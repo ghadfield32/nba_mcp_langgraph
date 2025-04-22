@@ -1,5 +1,7 @@
 """This file contains the database service for the application."""
 
+import socket
+import time
 from typing import (
     List,
     Optional,
@@ -37,10 +39,24 @@ class DatabaseService:
             # Configure environment-specific database connection pool settings
             pool_size = settings.POSTGRES_POOL_SIZE
             max_overflow = settings.POSTGRES_MAX_OVERFLOW
+            
+            # Check if we can resolve the 'db' hostname (works in Docker but not locally)
+            db_url = settings.POSTGRES_URL
+            
+            # If the DB URL contains hostname 'db', check if we can resolve it
+            if 'db:' in db_url and not self._can_resolve_hostname('db'):
+                # If we can't resolve 'db', replace with 'localhost' for local development
+                local_db_url = db_url.replace('db:', 'localhost:')
+                logger.info(
+                    "switching_to_local_db",
+                    original_url=db_url.replace(":mysecretpw@", ":****@"),  # Hide password in logs
+                    local_url=local_db_url.replace(":mysecretpw@", ":****@"),  # Hide password in logs
+                )
+                db_url = local_db_url
 
             # Create engine with appropriate pool configuration
             self.engine = create_engine(
-                settings.POSTGRES_URL,
+                db_url,
                 pool_pre_ping=True,
                 poolclass=QueuePool,
                 pool_size=pool_size,
@@ -63,6 +79,21 @@ class DatabaseService:
             # In production, don't raise - allow app to start even with DB issues
             if settings.ENVIRONMENT != Environment.PRODUCTION:
                 raise
+    
+    def _can_resolve_hostname(self, hostname, port=5432, timeout=1):
+        """Check if a hostname can be resolved and connected to."""
+        try:
+            # Try to resolve the hostname
+            socket.getaddrinfo(hostname, port, socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Try to connect to the resolved address
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((hostname, port))
+            sock.close()
+            return True
+        except (socket.gaierror, socket.timeout, ConnectionRefusedError):
+            return False
 
     async def create_user(self, email: str, password: str) -> User:
         """Create a new user.

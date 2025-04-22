@@ -264,6 +264,18 @@ It integrates seamlessly with multiple data sources—like Prometheus, PostgreSQ
 Grafana’s rich ecosystem of plugins, templating, and built‑in alerting enables tailored monitoring views and proactive operational insights. :contentReference[oaicite:11]{index=11}  
 
 
+## 🚀 Standalone Ollama + LangGraph Demo
+
+```bash
+# 1. Start Ollama:
+ollama serve --port 11434
+
+# 2. In one terminal, run your NBA MCP server:
+inv dev  # or `python -m nba_mcp --transport sse`
+
+# 3. In another terminal, run the demo:
+python examples/langgraph_ollama_agent_w_tools.py --mode local
+
 
 ## 🛠️ Adding New MCP Tools
 

@@ -3,7 +3,7 @@ name = "nba_mcp_langgraph"
 version = "0.2.0"
 description = "NBA MCP LangGraph"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.12",
     "langchain>=0.3.22",
@@ -49,6 +49,12 @@ dev = [
     "flake8",
     "ruff",
     "djlint==1.36.4",
+]
+
+examples = [
+    "langchain-core>=0.3.0",          # for langchain_core.messages
+    "langchain-ollama>=0.1.0",        # for ChatOllama
+    "langchain-mcp-adapters<=0.0.9",  # for MultiServerMCPClient
 ]
 
 [dependency-groups]
@@ -114,4 +120,11 @@ convention = "google"
 # Ignore `E402` (import violations) in all `__init__.py` files
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app"]
 

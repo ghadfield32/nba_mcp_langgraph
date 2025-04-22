@@ -1,12 +1,13 @@
-# grafana/dashboards/dashboards.yml
-
 apiVersion: 1
+
 providers:
-  - name: "nba-mcp-dashboards"
+  - name: "NBA MCP Dashboards"
     orgId: 1
-    folder: ""
+    folder: "NBA MCP Metrics"
     type: file
     disableDeletion: false
     updateIntervalSeconds: 10
+    allowUiUpdates: true
     options:
       path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true
