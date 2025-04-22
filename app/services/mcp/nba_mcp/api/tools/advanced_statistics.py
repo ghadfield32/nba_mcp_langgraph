@@ -3,8 +3,7 @@ from nba_api.stats.endpoints import (
     boxscoreadvancedv3,
     leaguegamefinder,
 )
-
-from .nba_api_utils import (
+from nba_api_utils import (
     get_player_id,
     normalize_date,
     normalize_season,

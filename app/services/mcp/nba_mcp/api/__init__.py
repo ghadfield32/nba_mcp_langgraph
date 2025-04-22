@@ -1,3 +1,12 @@
+"""
+NBA API Client Package.
+
+location: app\services\mcp\nba_mcp\api\__init__.py
+
+
+"""
+
+
 from .client import NBAApiClient
 
 __all__ = [

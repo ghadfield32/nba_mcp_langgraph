@@ -1,19 +1,45 @@
-# nba_api_utils.py
-import unicodedata
-import sys
-import os
-from pathlib import Path
+"""
+
+location: app\services\mcp\nba_mcp\api\tools\nba_api_utils.py
+
+"""
+
+
 import inspect
 import json
-from datetime import datetime, date
-from typing import Optional, Dict, Union, Any, List
-import pandas as pd
-from nba_api.live.nba.endpoints import scoreboard
-from nba_api.stats.endpoints import playercareerstats, LeagueLeaders, LeagueGameLog, scoreboardv2
-from datetime import timedelta
-from nba_api.stats.static import teams, players
-from dateutil.parser import parse  # Make sure to install python-dateutil if not already installed
 import logging
+import os
+import sys
+
+# nba_api_utils.py
+import unicodedata
+from datetime import (
+    date,
+    datetime,
+    timedelta,
+)
+from pathlib import Path
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
+
+import pandas as pd
+from dateutil.parser import parse  # Make sure to install python-dateutil if not already installed
+from nba_api.live.nba.endpoints import scoreboard
+from nba_api.stats.endpoints import (
+    LeagueGameLog,
+    LeagueLeaders,
+    playercareerstats,
+    scoreboardv2,
+)
+from nba_api.stats.static import (
+    players,
+    teams,
+)
 
 # Create explicit exports for these utility functions
 __all__ = [

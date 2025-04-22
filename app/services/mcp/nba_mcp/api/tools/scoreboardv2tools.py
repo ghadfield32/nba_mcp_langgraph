@@ -1,3 +1,10 @@
+"""
+
+location: app\services\mcp\nba_mcp\api\tools\scoreboardv2tools.py
+
+"""
+
+
 # scoreboardv2tools.py
 # great for getting live scores and data for today and yesterday or any specific date
 
