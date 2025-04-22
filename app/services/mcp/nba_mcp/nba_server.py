@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 # near the top of nba_server.py
 import argparse
 from fastmcp import Context
-
+from fastapi import APIRouter, Query
 # only grab “--mode” here and ignore any other flags
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument(
@@ -609,6 +609,106 @@ async def play_by_play(
     return json.dumps(md, indent=2)
 
 
+# ────────────────────────────────────────────────────────────
+# In nba_server.py, after your @mcp_server.tool() definitions:
+# ────────────────────────────────────────────────────────────
+
+router = APIRouter(prefix="/mcp/nba", tags=["mcp-nba"])
+
+@router.get("/scoreboard", summary="Live or historical scoreboard")
+async def live_scoreboard(
+    date: Optional[str] = Query(None, description="YYYY‑MM‑DD; defaults to today")
+):
+    return await get_live_scores(target_date=date)
+
+
+@router.get(
+    "/player/{player_name}/career_stats",
+    summary="Player career information"
+)
+async def player_career_stats(
+    player_name: str,
+    season: Optional[str] = Query(None, description="Season 'YYYY-YY'")
+):
+    return await get_player_career_information(
+        player_name=player_name,
+        season=season
+    )
+
+
+@router.get(
+    "/leaders/{category}",
+    summary="League leaders by stat"
+)
+async def league_leaders(
+    category: str = Query(..., description="Stat code (PTS, REB, AST, etc.)"),
+    per_mode: str = Query("PerGame", description="PerGame, Totals, or Per48"),
+    season: Optional[str] = Query(None, description="Season 'YYYY-YY'")
+):
+    params = LeagueLeadersParams(
+        stat_category=category,
+        per_mode=per_mode,
+        season=season
+    )
+    return await get_league_leaders_info(params)
+
+
+@router.get(
+    "/gamelog",
+    summary="Season game log by season/date/team"
+)
+async def game_log(
+    season: str = Query(..., description="Season 'YYYY-YY'"),
+    team: Optional[str] = Query(None, description="Team name or abbreviation"),
+    date_from: Optional[str] = Query(None, description="YYYY‑MM‑DD"),
+    date_to: Optional[str] = Query(None, description="YYYY‑MM‑DD")
+):
+    return await get_date_range_game_log_or_team_game_log(
+        season=season,
+        team=team,
+        date_from=date_from,
+        date_to=date_to
+    )
+
+
+@router.get(
+    "/playbyplay",
+    summary="Play‑by‑play for a game or all games today"
+)
+async def play_by_play_endpoint(
+    game_date: Optional[str] = Query(
+        None,
+        description="YYYY‑MM‑DD; when omitted, fetches all games today"
+    ),
+    team: Optional[str] = Query(
+        None,
+        description="Team name or abbreviation; when omitted, iterates all games"
+    ),
+    start_period: int = Query(
+        1, ge=1, le=4, description="Starting quarter (1–4) for historical"
+    ),
+    end_period: int = Query(
+        4, ge=1, le=4, description="Ending quarter (1–4) for historical"
+    ),
+    start_clock: Optional[str] = Query(
+        None, description="Clock 'MM:SS' to begin historical output"
+    ),
+    recent_n: int = Query(
+        5, ge=1, description="Number of recent live plays to include"
+    ),
+    max_lines: int = Query(
+        200, ge=1, description="Max total lines of Markdown to return"
+    ),
+):
+    return await play_by_play(
+        game_date=game_date,
+        team=team,
+        start_period=start_period,
+        end_period=end_period,
+        start_clock=start_clock,
+        recent_n=recent_n,
+        max_lines=max_lines
+    )
 
 
 

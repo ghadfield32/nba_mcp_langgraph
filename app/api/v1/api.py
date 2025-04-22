@@ -12,6 +12,9 @@ from app.core.logging import logger
 
 api_router = APIRouter()
 
+from app.services.mcp.nba_mcp.nba_server import router as mcp_nba_router
+api_router.include_router(mcp_nba_router)
+
 # Include routers
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(chatbot_router, prefix="/chatbot", tags=["chatbot"])
