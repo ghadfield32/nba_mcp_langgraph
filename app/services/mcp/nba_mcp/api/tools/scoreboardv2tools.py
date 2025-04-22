@@ -1,6 +1,6 @@
 """
 
-location: app\services\mcp\nba_mcp\api\tools\scoreboardv2tools.py
+location: app/services/mcp/nba_mcp/api/tools/scoreboardv2tools.py
 
 """
 
@@ -24,7 +24,7 @@ from nba_api.stats.endpoints import (
     scoreboardv2,
 )
 
-from .nba_api_utils import (
+from app.services.mcp.nba_mcp.api.tools.nba_api_utils import (
     format_game,
     get_player_id,
     get_player_name,

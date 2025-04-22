@@ -19,14 +19,10 @@ from typing import (
 )
 
 import pandas as pd
-from fastapi import (
-    APIRouter,
-    Query,
-)
-from fastmcp import (
-    Context,
-    FastMCP,
-)
+from fastapi import APIRouter
+from fastapi import Path as ParamPath
+from fastapi import Query
+from fastmcp import FastMCP
 from nba_api.stats.static import (
     players,
     teams,
@@ -134,12 +130,12 @@ class LeagueLeadersParams(BaseModel):
 
 
 # ── 3) Load & cache both JSON files once ───────────────────
-from pathlib import Path
+from pathlib import Path as FSPath
 
 # Possible locations for documentation files:
-_project_root = Path(__file__).resolve().parents[1]
+_project_root = FSPath(__file__).resolve().parents[1]
 _root_docs = _project_root / "api_documentation"
-_pkg_docs = Path(__file__).resolve().parent / "api_documentation"
+_pkg_docs = FSPath(__file__).resolve().parent / "api_documentation"
 
 
 def _load_cached(filename: str) -> str:
@@ -626,7 +622,7 @@ async def player_career_stats(player_name: str, season: Optional[str] = Query(No
 
 @router.get("/leaders/{category}", summary="League leaders by stat")
 async def league_leaders(
-    category: str = Query(..., description="Stat code (PTS, REB, AST, etc.)"),
+    category: str = ParamPath(..., description="Stat code (PTS, REB, AST, etc.)"),
     per_mode: str = Query("PerGame", description="PerGame, Totals, or Per48"),
     season: Optional[str] = Query(None, description="Season 'YYYY-YY'"),
 ):
