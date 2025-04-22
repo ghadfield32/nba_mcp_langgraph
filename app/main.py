@@ -1,4 +1,8 @@
-"""This file contains the main application entry point."""
+"""This file contains the main application entry point.
+
+location: app\main.py
+
+"""
 
 import os
 from contextlib import asynccontextmanager
@@ -18,6 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langfuse import Langfuse
+from prometheus_client import make_asgi_app
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -60,8 +65,11 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     lifespan=lifespan,
 )
+# Metrics (for all FastAPI routes)
+app.mount("/metrics", make_asgi_app())
 
 # Set up Prometheus metrics
+
 setup_metrics(app)
 
 # Add custom metrics middleware

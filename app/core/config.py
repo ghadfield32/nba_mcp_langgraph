@@ -1,5 +1,6 @@
 """Application configuration management.
 
+location: app\core\config.py
 This module handles environment-specific configuration loading, parsing, and management
 for the application. It includes environment detection, .env file loading, and
 configuration value parsing.

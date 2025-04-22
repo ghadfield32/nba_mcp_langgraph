@@ -1,0 +1,30 @@
+{
+    "dashboard": {
+        "id": null,
+        "title": "NBA MCP Metrics",
+        "panels": [
+            {
+                "type": "graph",
+                "title": "Total MCP Calls",
+                "targets": [
+                    {
+                        "expr": "promhttp_metric_handler_requests_total",
+                        "legendFormat": "{{code}}"
+                    }
+                ]
+            },
+            {
+                "type": "graph",
+                "title": "MCP Handler Latency",
+                "targets": [
+                    {
+                        "expr": "promhttp_metric_handler_request_duration_seconds_bucket",
+                        "legendFormat": "{{le}}"
+                    }
+                ]
+            }
+        ],
+        "schemaVersion": 27,
+        "version": 0
+    }
+}

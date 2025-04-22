@@ -3,8 +3,11 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'fastapi'
+  - job_name: "nba_mcp_claude"
     static_configs:
-      - targets: ['app:8000']
-    metrics_path: '/metrics'
-    scheme: 'http' 
+      - targets: ["app:8000"]
+  - job_name: "nba_mcp_local"
+    static_configs:
+      - targets: ["app:8001"]
+    metrics_path: "/metrics"
+    scheme: "http"

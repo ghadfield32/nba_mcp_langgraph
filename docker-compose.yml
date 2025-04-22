@@ -31,7 +31,8 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "8000:8000" # MCP + FastAPI port
+      - "8001:8001" # local port
     volumes:
       - ./app:/app/app
       - ./logs:/app/logs

@@ -1,7 +1,8 @@
-# nba_mcp/__main__.py
-import sys
+# app\services\mcp\nba_mcp\__main__.py
 import logging
 import os
+import sys
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -19,7 +20,7 @@ def print_debug_info():
 def main():
     print_debug_info()
     try:
-        from nba_mcp.nba_server import main as server_main
+        from .nba_server import main as server_main
         logger.info("Launching NBA MCP…")
         server_main()
     except ModuleNotFoundError as e:

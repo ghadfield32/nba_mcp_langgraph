@@ -104,7 +104,7 @@ Local (no Docker)
 
 uv sync
 # "claude" mode → SSE/WSS on port from NBA_MCP_PORT (default 8000)
-python nba_mcp/nba_server.py --mode claude --transport sse
+python app\services\mcp\nba_mcp\nba_server.py --mode claude --transport sse
 
 Docker Compose
 
