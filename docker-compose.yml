@@ -31,23 +31,13 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000" # MCP + FastAPI port
-      - "8001:8001" # local port
+      - "8000:8000"   # main FastAPI
+      - "8001:8001"   # Claude transport
     volumes:
       - ./app:/app/app
       - ./logs:/app/logs
     env_file:
       - .env.${APP_ENV:-development}
-    environment:
-      - APP_ENV=${APP_ENV:-development}
-      # point at the `db` service, _not_ localhost
-      - POSTGRES_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-mysecretpw}@db:5432/${POSTGRES_DB:-nba_mcp_dev}
-      - POSTGRES_POOL_SIZE=${POSTGRES_POOL_SIZE:-5}
-      - POSTGRES_MAX_OVERFLOW=${POSTGRES_MAX_OVERFLOW:-10}
-      - LLM_API_KEY=${LLM_API_KEY:-dummy-key-for-development}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-supersecretkeythatshouldbechangedforproduction}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -57,18 +47,24 @@ services:
     restart: on-failure
     networks:
       - monitoring
-
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
   prometheus:
     image: prom/prometheus:latest
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
+      - --config.file=/etc/prometheus/prometheus.yml
+    restart: always
     networks:
       - monitoring
-    restart: always
+    depends_on:                           # <-- added
+      app:
+        condition: service_started
 
   grafana:
     image: grafana/grafana:latest
@@ -76,17 +72,22 @@ services:
       - "3000:3000"
     volumes:
       - grafana-storage:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    restart: always
     networks:
       - monitoring
-    restart: always
 
 networks:
   monitoring:
+    name: monitoring
     driver: bridge
+    attachable: true
 
 volumes:
-  grafana-storage:
   db-data:
+  grafana-storage:

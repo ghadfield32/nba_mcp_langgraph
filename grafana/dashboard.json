@@ -2,6 +2,8 @@
     "dashboard": {
         "id": null,
         "title": "NBA MCP Metrics",
+        "schemaVersion": 27,
+        "version": 0,
         "panels": [
             {
                 "type": "graph",
@@ -23,8 +25,6 @@
                     }
                 ]
             }
-        ],
-        "schemaVersion": 27,
-        "version": 0
+        ]
     }
 }
