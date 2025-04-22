@@ -1,8 +1,15 @@
-# FastAPI LangGraph Agent Template
+# NBA Machine Learning Prediction (MCP) Platform with LangGraph Integration
 
-A production-ready FastAPI template for building AI agent applications with LangGraph integration. This template provides a robust foundation for building scalable, secure, and maintainable AI agent services.
+A state-of-the-art FastAPI application for NBA data analysis and prediction leveraging LangGraph's AI agent workflows. This platform combines real-time NBA data with advanced machine learning techniques to deliver insights and predictions.
 
 ## 🌟 Features
+
+- **NBA Data Integration**
+
+  - Real-time NBA game data and statistics
+  - Historical player and team performance tracking
+  - Live scoreboard and play-by-play analysis
+  - Comprehensive league leaders and career statistics
 
 - **Production-Ready Architecture**
 
@@ -14,6 +21,14 @@ A production-ready FastAPI template for building AI agent applications with Lang
   - PostgreSQL for data persistence
   - Docker and Docker Compose support
   - Prometheus metrics and Grafana dashboards for monitoring
+
+- **Advanced NBA Analytics**
+
+  - Player career statistics analysis
+  - Team performance metrics
+  - League leaders tracking
+  - Game log data exploration
+  - Play-by-play breakdown and analysis
 
 - **Security**
 
@@ -37,6 +52,16 @@ A production-ready FastAPI template for building AI agent applications with Lang
   - Detailed JSON reports with success/failure metrics
   - Interactive command-line interface
   - Customizable evaluation metrics
+
+## 🏀 NBA Data Endpoints
+
+The platform provides rich endpoints for NBA data:
+
+- `/scoreboard` - Live or historical NBA scoreboard data
+- `/player/{player_name}/career_stats` - Comprehensive player career information
+- `/leaders/{category}` - League leaders by statistical category
+- `/gamelog` - Season game logs by season/date/team
+- `/playbyplay` - Detailed play-by-play data for games
 
 ## 🚀 Quick Start
 
@@ -155,7 +180,7 @@ make eval-quick [ENV=development|staging|production]
 make eval-no-report [ENV=development|staging|production]
 ```
 
-### Evaluation Features
+## 🔧 NBA MCP Server Configuration
 
 - **Interactive CLI**: User-friendly interface with colored output and progress bars
 - **Flexible Configuration**: Set default values or customize at runtime

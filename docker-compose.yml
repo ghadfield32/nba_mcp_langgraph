@@ -1,12 +1,35 @@
-version: '3.8'
+# docker-compose.yml
 
 services:
-  # Single API service with dynamic environment
+  db:
+    image: postgres:15
+    container_name: nba-db-dev
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mysecretpw}
+      POSTGRES_DB: ${POSTGRES_DB:-nba_mcp_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - monitoring
+
   app:
     build:
       context: .
       args:
         APP_ENV: ${APP_ENV:-development}
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
@@ -16,7 +39,10 @@ services:
       - .env.${APP_ENV:-development}
     environment:
       - APP_ENV=${APP_ENV:-development}
-      # Pass sensitive variables at runtime
+      # point at the `db` service, _not_ localhost
+      - POSTGRES_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-mysecretpw}@db:5432/${POSTGRES_DB:-nba_mcp_dev}
+      - POSTGRES_POOL_SIZE=${POSTGRES_POOL_SIZE:-5}
+      - POSTGRES_MAX_OVERFLOW=${POSTGRES_MAX_OVERFLOW:-10}
       - LLM_API_KEY=${LLM_API_KEY:-dummy-key-for-development}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
@@ -31,7 +57,6 @@ services:
     networks:
       - monitoring
 
-  # Prometheus
   prometheus:
     image: prom/prometheus:latest
     ports:
@@ -44,7 +69,6 @@ services:
       - monitoring
     restart: always
 
-  # Grafana
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -63,4 +87,5 @@ networks:
     driver: bridge
 
 volumes:
-  grafana-storage: 
+  grafana-storage:
+  db-data:
