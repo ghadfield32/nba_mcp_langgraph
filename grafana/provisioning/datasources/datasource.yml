@@ -7,3 +7,4 @@ datasources:
     access: proxy
     isDefault: true
     editable: false
+    uid: PBFA97CFB590B2093

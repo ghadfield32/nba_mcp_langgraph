@@ -38,6 +38,8 @@ services:
       - ./logs:/app/logs
     env_file:
       - .env.${APP_ENV:-development}
+    environment:
+      POSTGRES_URL: postgresql://postgres:mysecretpw@db:5432/nba_mcp_dev
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -47,8 +49,9 @@ services:
     restart: on-failure
     networks:
       - monitoring
+    entrypoint: []  # Override the Dockerfile entrypoint
     command: >
-      uvicorn app.main:app
+      /app/.venv/bin/uvicorn app.main:app
       --host 0.0.0.0
       --port 8000
   prometheus:
@@ -62,7 +65,7 @@ services:
     restart: always
     networks:
       - monitoring
-    depends_on:                           # <-- added
+    depends_on:                          
       app:
         condition: service_started
 
