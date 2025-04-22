@@ -53,6 +53,77 @@ A state-of-the-art FastAPI application for NBA data analysis and prediction leve
   - Interactive command-line interface
   - Customizable evaluation metrics
 
+
+## 🏷️ Ports & Endpoints
+
+| Service            | Port    | Purpose / Endpoint                                 |
+| ------------------ | ------- | -------------------------------------------------- |
+| **App (FastAPI)**  | 8000    | Main API & MCP SSE/WSS (default “claude” mode)     |
+|                    | 8001    | Alternative “local” SSE/WSS mode                    |
+|                    | 8000    | Swagger UI: `http://localhost:8000/docs`           |
+| **PostgreSQL DB**  | 5432    | `db` service; connection string:                   |
+|                    |         | `postgresql://postgres:mysecretpw@db:5432/nba_mcp_dev` |
+| **Prometheus**     | 9090    | Metrics scrape target: `http://app:8000/metrics`   |
+| Prometheus config: |         | `prometheus/prometheus.yml`                        |
+| **Grafana**        | 3000    | Dashboards: `http://localhost:3000`<br/>Admin/admin |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.13+  
+- PostgreSQL  
+- Docker & Docker Compose  
+
+### Environment Setup
+
+```bash
+git clone <repository-url>
+cd <project-directory>
+uv sync                              # create & activate venv
+cp .env.example .env.development     # or .env.staging / .env.production
+# Edit `.env.development`:
+#   • APP_ENV=development
+#   • NBA_MCP_PORT=8000               # SSE/WSS port for “claude” mode
+#   • POSTGRES_URL=postgresql://postgres:mysecretpw@db:5432/nba_mcp_dev
+#   • LLM_API_KEY=sk-…
+#   • JWT_SECRET_KEY=…
+
+### Database setup
+
+    docker compose up -d db
+
+    Verify healthy: docker ps shows nba-db-dev on 5432, healthy status
+
+    (Optional) Manually apply schemas.sql if migrations fail
+
+Running the Application
+Local (no Docker)
+
+uv sync
+# "claude" mode → SSE/WSS on port from NBA_MCP_PORT (default 8000)
+python nba_mcp/nba_server.py --mode claude --transport sse
+
+Docker Compose
+
+# build & start all services (db, app, prometheus, grafana)
+docker compose up -d --build
+
+# or target only the app + db:
+docker compose up -d db app
+
+Once up:
+
+    API & MCP → http://localhost:8000
+
+    Swagger UI → http://localhost:8000/docs
+
+    Prometheus → http://localhost:9090
+
+    Grafana → http://localhost:3000 (admin/admin)
+
 ## 🏀 NBA Data Endpoints
 
 The platform provides rich endpoints for NBA data:
@@ -62,6 +133,22 @@ The platform provides rich endpoints for NBA data:
 - `/leaders/{category}` - League leaders by statistical category
 - `/gamelog` - Season game logs by season/date/team
 - `/playbyplay` - Detailed play-by-play data for games
+
+
+## 🏷️ Ports & Endpoints
+
+| Service            | Port    | Purpose / Endpoint                                 |
+| ------------------ | ------- | -------------------------------------------------- |
+| **App (FastAPI)**  | 8000    | Main API & MCP SSE/WSS (default “claude” mode)     |
+|                    | 8001    | Alternative “local” SSE/WSS mode                    |
+|                    | 8000    | Swagger UI: `http://localhost:8000/docs`           |
+| **PostgreSQL DB**  | 5432    | `db` service; connection string:                   |
+|                    |         | `postgresql://postgres:mysecretpw@db:5432/nba_mcp_dev` |
+| **Prometheus**     | 9090    | Metrics scrape target: `http://app:8000/metrics`   |
+| Prometheus config: |         | `prometheus/prometheus.yml`                        |
+| **Grafana**        | 3000    | Dashboards: `http://localhost:3000`<br/>Admin/admin |
+
+
 
 ## 🚀 Quick Start
 
@@ -126,6 +213,8 @@ make [dev|staging|production] # e.g. make dev
 ```bash
 http://localhost:8000/docs
 ```
+
+
 
 #### Using Docker
 
@@ -214,7 +303,57 @@ Each report includes:
 
 ## 🔧 Configuration
 
-The application uses a flexible configuration system with environment-specific settings:
+    .env.development, .env.staging, .env.production for each environment
 
-- `.env.development`
--
+    Key variables:
+
+        APP_ENV — which environment profile to load
+
+        NBA_MCP_PORT — SSE/WSS port (8000 for “claude”, 8001 for “local”)
+
+        POSTGRES_URL — should point at db:5432 when running in Compose
+
+        LLM_API_KEY, JWT_SECRET_KEY, etc.
+
+## ⚙️ Docker Compose Services
+
+services:
+  db:
+    image: postgres:15
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: mysecretpw
+      POSTGRES_DB: nba_mcp_dev
+
+  app:
+    build: .
+    ports: ["8000:8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.${APP_ENV:-development}
+    environment:
+      NBA_MCP_PORT: ${NBA_MCP_PORT:-8000}
+      POSTGRES_URL: postgresql://postgres:mysecretpw@db:5432/nba_mcp_dev
+      LLM_API_KEY: ${LLM_API_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+    healthcheck:
+      test: ["CMD","curl","-f","http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
