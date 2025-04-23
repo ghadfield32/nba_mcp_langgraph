@@ -1,5 +1,7 @@
 """Chatbot API endpoints for handling chat interactions.
 
+location: app/api/v1/chatbot.py
+
 This module provides endpoints for chat interactions, including regular chat,
 streaming chat, message history management, and chat history clearing.
 """

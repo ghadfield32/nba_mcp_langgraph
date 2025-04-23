@@ -120,7 +120,7 @@ Start the database:
 ```bash
 docker compose up -d db
 ```
-Verify it’s healthy:
+Verify it's healthy:
 ```bash
 docker ps  # look for "nba-db-dev" on port 5432 with healthy status
 ```
@@ -233,7 +233,7 @@ Alternatively, you can import JSON manually via ＋ → Import in the Grafana UI
 We recommend **using Grafana as a single pane of glass**—it can host all four dashboards (plus any future ones) in one UI. That keeps everything centralized:
 
 - **One login**, **one data source configuration**, and **consistent alerts**.
-- Easily create a **“folder”** inside Grafana called “NBA MCP” to group these dashboards.
+- Easily create a **"folder"** inside Grafana called "NBA MCP" to group these dashboards.
 
 ---
 
@@ -261,7 +261,7 @@ Its standalone architecture ensures high reliability, minimal external dependenc
 ### Grafana
 Grafana is an open‑source analytics and visualization platform that lets you create interactive, dynamic dashboards. :contentReference[oaicite:9]{index=9}  
 It integrates seamlessly with multiple data sources—like Prometheus, PostgreSQL, and more—allowing you to correlate metrics across your stack. :contentReference[oaicite:10]{index=10}  
-Grafana’s rich ecosystem of plugins, templating, and built‑in alerting enables tailored monitoring views and proactive operational insights. :contentReference[oaicite:11]{index=11}  
+Grafana's rich ecosystem of plugins, templating, and built‑in alerting enables tailored monitoring views and proactive operational insights. :contentReference[oaicite:11]{index=11}  
 
 
 ## 🚀 Standalone Ollama + LangGraph Demo
@@ -279,7 +279,7 @@ python examples/langgraph_ollama_agent_w_tools.py --mode local
 
 ## 🛠️ Adding New MCP Tools
 
-If you’d like to extend the NBA MCP server with your own tools:
+If you'd like to extend the NBA MCP server with your own tools:
 
 1. **Define a Pydantic model** for any structured parameters (optional):
    ```python
@@ -309,5 +309,123 @@ If you’d like to extend the NBA MCP server with your own tools:
 
 4. **Reload the server** (in dev) or rebuild your Docker image (in prod).
 
-Your new tool will now be discoverable via MCP’s `/messages/` SSE/WSS and as a standard HTTP endpoint under `/api/v1/mcp/nba/`.
+Your new tool will now be discoverable via MCP's `/messages/` SSE/WSS and as a standard HTTP endpoint under `/api/v1/mcp/nba/`.
+
+
+# NBA MCP - Two-Port Architecture
+
+This project implements a FastMCP server for NBA data with a two-port architecture that separates the main API server from the Server-Sent Events (SSE) server.
+
+## Overview
+
+The application uses two separate ports for better separation of concerns:
+
+- **Main API Server** (port 8000 by default): Handles regular HTTP requests, API endpoints, and documentation.
+- **SSE Server** (port 8001 by default): Dedicated to Server-Sent Events for real-time data streaming.
+
+This approach provides several benefits:
+- Clear separation between HTTP API and event streaming concerns
+- No path conflicts or complex mounting logic
+- Simpler debugging and testing
+- Better scalability (each server can be scaled independently)
+
+## Configuration
+
+The port configuration is controlled by environment variables:
+
+```bash
+# Main API port (default: 8000)
+NBA_MCP_PORT=8000
+
+# SSE server port (default: 8001)
+NBA_MCP_SSE_PORT=8001
+
+# Host to bind (default: 0.0.0.0)
+FASTMCP_SSE_HOST=0.0.0.0
+```
+
+## Running the Servers
+
+### Option 1: Using the helper script (recommended)
+
+The simplest way to run both servers is using the provided helper script:
+
+```bash
+python start_servers.py
+```
+
+This script starts both servers in parallel and handles logging and shutdown for you.
+
+### Option 2: Running servers individually
+
+If you prefer to run the servers in separate terminals:
+
+1. Start the Main API server:
+   ```bash
+   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+2. Start the SSE server:
+   ```bash
+   python run_sse.py --mode local
+   ```
+
+## Running the Example Agent
+
+Once both servers are running, you can run the example Langgraph agent:
+
+```bash
+python examples/langgraph_ollama_agent_w_tools.py --mode local
+```
+
+The example automatically connects to both servers:
+- Main API at `http://localhost:8000`
+- SSE server at `http://localhost:8001`
+
+## API Documentation
+
+- OpenAPI documentation: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+
+## Debugging
+
+If you encounter issues:
+
+1. Verify both servers are running on their respective ports:
+   ```bash
+   curl http://localhost:8000/health
+   curl http://localhost:8001/sse
+   ```
+
+2. Check environment variables:
+   ```bash
+   echo $NBA_MCP_PORT
+   echo $NBA_MCP_SSE_PORT
+   ```
+
+3. Enable debug mode for more verbose logging:
+   ```bash
+   python run_sse.py --mode local --debug
+   ```
+
+## Architecture Details
+
+### Main Components
+
+1. **FastAPI Application** (`app/main.py`):
+   - Runs on NBA_MCP_PORT (default 8000)
+   - Handles HTTP API requests, documentation, and other web services
+
+2. **SSE Server** (`run_sse.py`):
+   - Runs on NBA_MCP_SSE_PORT (default 8001)
+   - Dedicated to SSE events using FastMCP
+   - Handles real-time data streaming
+
+3. **NBA MCP Server** (`app/services/mcp/nba_mcp/nba_server.py`):
+   - Creates and configures the FastMCP server
+   - Dynamically chooses port based on mode (local/claude)
+
+4. **Example Client** (`examples/langgraph_ollama_agent_w_tools.py`):
+   - Connects to both servers
+   - Demonstrates usage of NBA MCP tools via Langgraph
 

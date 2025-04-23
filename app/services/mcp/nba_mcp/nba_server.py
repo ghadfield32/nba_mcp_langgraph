@@ -2,6 +2,9 @@
 # near the top of nba_server.py
 import argparse
 import json
+
+# import logger
+import logging
 import os
 import sys
 import traceback
@@ -22,7 +25,6 @@ import pandas as pd
 from fastapi import APIRouter
 from fastapi import Path as ParamPath
 from fastapi import Query
-from fastmcp import FastMCP
 from nba_api.stats.static import (
     players,
     teams,
@@ -34,6 +36,8 @@ from pydantic import (
     BaseModel,
     Field,
 )
+
+from fastmcp import FastMCP
 
 from .api.client import NBAApiClient
 from .api.tools.nba_api_utils import (
@@ -49,50 +53,57 @@ from .api.tools.nba_api_utils import (
     normalize_stat_category,
 )
 
-# only grab “--mode” here and ignore any other flags
-parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument("--mode", choices=["claude", "local"], default="claude", help="Which port profile to use")
-args, _ = parser.parse_known_args()
-
-if args.mode == "claude":
-    BASE_PORT = int(os.getenv("NBA_MCP_PORT", "8000"))
-else:
-    BASE_PORT = int(os.getenv("NBA_MCP_PORT", "8001"))
-
-# python nba_server.py --mode local       # runs on 8001
-# python nba_server.py --mode claude      # runs on 8000
-
-
-# import logger
-import logging
-
 logger = logging.getLogger(__name__)
 
-
-# ── 1) Read configuration up‑front ────────────────────────
 HOST = os.getenv("FASTMCP_SSE_HOST", "0.0.0.0")
-PATH = os.getenv("FASTMCP_SSE_PATH", "/sse")
 
-# ── 2) Create the global server instance for decorator registration ──
-mcp_server = FastMCP(name="nba_mcp", host=HOST, port=BASE_PORT, path=PATH)
+def create_mcp_server():
+    """
+    Factory: build & return a FastMCP instance, but do not run it.
+    - configures host/port from ENV or CLI args
+    - registers metrics mount if standalone
+    - DOES NOT start the server
+    """
+    # only grab "--mode" here and ignore any other flags
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mode", choices=["claude", "local"], default="claude", help="Which port profile to use")
+    args, _ = parser.parse_known_args()
 
-import fastmcp
+    # Environment variables for ports configuration
+    HOST = os.getenv("FASTMCP_SSE_HOST", "0.0.0.0")
+    API_PORT = int(os.getenv("NBA_MCP_PORT", "8000"))
+    SSE_PORT = int(os.getenv("NBA_MCP_SSE_PORT", "8001"))
 
-logger.debug("fastmcp.__version__ = %r", getattr(fastmcp, "__version__", None))
-logger.debug("mcp_server is %r", mcp_server)
-logger.debug("dir(mcp_server) = %s", dir(mcp_server))
+    # If we're in local mode, run the SSE server on SSE_PORT; otherwise on API_PORT
+    port = SSE_PORT if args.mode == "local" else API_PORT
 
-# ── 2.1) Mount Prometheus metrics for the MCP HTTP transport ──
-metrics_app = make_asgi_app()
+    # ── 2) Create the server instance for decorator registration ──
+    #    (use FastMCP defaults: message_path="/messages", sse_path="/sse")
+    mcp = FastMCP(name="nba_mcp", host=HOST, port=port)
 
-# DEBUG: inspect sse_app
-logger.debug("mcp_server.sse_app -> %r", mcp_server.sse_app)
-logger.debug("callable(mcp_server.sse_app)? %s", callable(mcp_server.sse_app))
+    # Read the env-var directly and print it via %-format or f-string
+    logger.debug("FASTMCP_SSE_PATH env var = %r", os.getenv("FASTMCP_SSE_PATH"))
 
-# Get the real ASGI app and mount
-_asgi = mcp_server.sse_app()
-_asgi.mount("/metrics", metrics_app)
+    # Dump out exactly what attrs ServerSettings has
+    logger.debug("mcp_server.settings attrs = %s", list(vars(mcp.settings).keys()))
 
+    import fastmcp
+    logger.debug("fastmcp.__version__ = %r", getattr(fastmcp, "__version__", None))
+    logger.debug("mcp_server is %r", mcp)
+    logger.debug("dir(mcp_server) = %s", dir(mcp))
+
+    # ── 2.1) Mount Prometheus metrics for the MCP HTTP transport ──
+    metrics_app = make_asgi_app()
+
+    # Only mount in standalone mode (not when embedded in FastAPI)
+    if os.getenv("MCP_RUN_MODE", "standalone") == "standalone":
+        _asgi = mcp.sse_app()
+        _asgi.mount("/metrics", metrics_app)
+        
+    return mcp
+
+# Create a single module-level instance
+mcp_server = create_mcp_server()
 
 # ===== ONE‑LINE ADDITION =====
 mcp = mcp_server  # Alias so the FastMCP CLI can auto‑discover the server
@@ -182,7 +193,7 @@ async def get_static_data() -> str:
 @mcp_server.resource("nba://player/{player_name}/career/{season}")
 async def player_career_stats_resource(player_name: str, season: str):
     """
-    Returns raw JSON records (list of dicts) for a player’s career stats in a season.
+    Returns raw JSON records (list of dicts) for a player's career stats in a season.
     """
     client = NBAApiClient()
     # always return list-of‑records
@@ -262,7 +273,7 @@ async def playbyplay_resource(
       `nba://playbyplay/{game_date}/{team}/{start_period}/{end_period}/{start_clock}/{recent_n}/{max_lines}`
 
     **Parameters (all via path segments):**
-      - `game_date` (str): YYYY‑MM‑DD. For live/pregame, use today’s date.
+      - `game_date` (str): YYYY‑MM‑DD. For live/pregame, use today's date.
       - `team` (str): Team name or abbreviation (e.g. "Lakers").
       - `start_period` (int): Starting quarter for historical output (1–4).
       - `end_period` (int): Ending quarter for historical output (1–4).
@@ -667,14 +678,9 @@ async def play_by_play_endpoint(
 # Running the Server
 #########################################
 
-
-# ------------------------------------------------------------------
-# nba_server.py
-# ------------------------------------------------------------------
 def main():
-    """Parse CLI args and start FastMCP server (with fallback)."""
+    """CLI entrypoint: runs FastMCP server (stdio/sse/websocket) until killed."""
     parser = argparse.ArgumentParser(prog="nba-mcp")
-    parser.add_argument("--mode", choices=["claude", "local"], default="claude", help="Which port profile to use")
     parser.add_argument(
         "--transport",
         choices=["stdio", "sse", "websocket"],
@@ -691,10 +697,8 @@ def main():
     args = parser.parse_args()
 
     # pick port based on mode
-    if args.mode == "claude":
-        port = int(os.getenv("NBA_MCP_PORT", "8000"))
-    else:
-        port = int(os.getenv("NBA_MCP_PORT", "8001"))
+    port = int(os.getenv("NBA_MCP_PORT", "8000"))
+
 
     transport = args.transport
     host = args.host
@@ -713,10 +717,10 @@ def main():
     try:
         if transport == "stdio":
             logger.info("Starting FastMCP server on STDIO")
-            mcp.run()
+            mcp_server.run()
         else:
             logger.info("Starting FastMCP server on %s://%s:%s", transport, host, port)
-            mcp.run(transport=transport)
+            mcp_server.run(transport=transport)
     except Exception:
         logger.exception("Failed to start MCP server (transport=%s)", transport)
         sys.exit(1)

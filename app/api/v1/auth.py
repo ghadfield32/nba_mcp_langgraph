@@ -109,8 +109,14 @@ async def get_current_session(
         HTTPException: If the token is invalid or missing.
     """
     try:
+        # Log request details
+        logger.info("get_current_session_called", token_provided=credentials is not None)
+        
         # Sanitize token
         token = sanitize_string(credentials.credentials)
+        
+        # Log sanitized token (first 10 chars only for security)
+        logger.info("processing_token", token_prefix=token[:10] + "...")
 
         session_id = verify_token(token)
         if session_id is None:
@@ -123,6 +129,7 @@ async def get_current_session(
 
         # Sanitize session_id before using it
         session_id = sanitize_string(session_id)
+        logger.info("token_verified", session_id=session_id)
 
         # Verify session exists in database
         session = await db_service.get_session(session_id)
@@ -134,12 +141,21 @@ async def get_current_session(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        logger.info("session_found", session_id=session_id, user_id=session.user_id)
         return session
     except ValueError as ve:
         logger.error("token_validation_failed", error=str(ve), exc_info=True)
         raise HTTPException(
             status_code=422,
             detail="Invalid token format",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        # Add catch-all to log unexpected errors
+        logger.error("unexpected_auth_error", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=403,
+            detail="Authorization failed due to an unexpected error",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

@@ -12,7 +12,6 @@ from typing import (
     Dict,
 )
 
-
 from dotenv import load_dotenv
 from fastapi import (
     FastAPI,
@@ -26,6 +25,7 @@ from langfuse import Langfuse
 from prometheus_client import make_asgi_app
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.v1.api import api_router
 from app.core.config import settings
@@ -34,6 +34,7 @@ from app.core.logging import logger
 from app.core.metrics import setup_metrics
 from app.core.middleware import MetricsMiddleware
 from app.services.database import database_service
+from app.services.mcp.nba_mcp.nba_server import mcp_server
 
 # Load environment variables
 load_dotenv()
@@ -55,6 +56,21 @@ async def lifespan(app: FastAPI):
         version=settings.VERSION,
         api_prefix=settings.API_V1_STR,
     )
+    
+    # Debug mount points and routes
+    logger.info("Dumping all registered routes for debugging:")
+    for route in app.routes:
+        methods = getattr(route, "methods", None)
+        path = getattr(route, "path", str(route))
+        logger.info(f"ROUTE: {path} - {methods}")
+    
+    # Verify SSE mount points
+    logger.info("MCP Server Settings:")
+    logger.info(f"message_path: {mcp_server.settings.message_path}")
+    logger.info(f"sse_path: {mcp_server.settings.sse_path}")
+    logger.info(f"host: {mcp_server.settings.host}")
+    logger.info(f"port: {mcp_server.settings.port}")
+    
     yield
     logger.info("application_shutdown")
 
@@ -66,11 +82,42 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     lifespan=lifespan,
 )
-# Metrics (for all FastAPI routes)
-app.mount("/metrics", make_asgi_app())
+
+# Debug OpenAPI configuration - especially for authentication
+@app.on_event("startup")
+async def debug_openapi_config():
+    """Log OpenAPI configuration for debugging."""
+    logger.info("OpenAPI security schemes:")
+    openapi_schema = app.openapi()
+    if "components" in openapi_schema and "securitySchemes" in openapi_schema["components"]:
+        logger.info(f"Security schemes defined: {list(openapi_schema['components']['securitySchemes'].keys())}")
+    else:
+        logger.warning("No security schemes defined in OpenAPI schema")
+    
+    # Check for global security requirement
+    if "security" in openapi_schema:
+        logger.info(f"Global security requirements: {openapi_schema['security']}")
+    else:
+        logger.warning("No global security requirements in OpenAPI schema")
+
+# Mount the MCP SSE app at a dedicated path for clarity and to avoid conflicts
+# First create the SSE app with the correct configuration
+mcp_sse_app = mcp_server.sse_app()
+
+# Extract relevant paths from the server settings
+sse_path = mcp_server.settings.sse_path.strip('/')
+message_path = mcp_server.settings.message_path.strip('/')
+
+# Log the changes in configuration - SSE now runs on its own port
+logger.info("MCP SSE endpoints are now configured to run on a separate port")
+logger.info(f"  Main API: port {os.getenv('NBA_MCP_PORT', '8000')}")
+logger.info(f"  SSE Server: port {os.getenv('NBA_MCP_SSE_PORT', '8001')}")
+logger.info(f"  Run with: python run_sse.py --mode local")
+
+# Note: No longer mounting SSE endpoints in the main FastAPI app
+# The SSE server runs on its own port NBA_MCP_SSE_PORT (default 8001)
 
 # Set up Prometheus metrics
-
 setup_metrics(app)
 
 # Add custom metrics middleware

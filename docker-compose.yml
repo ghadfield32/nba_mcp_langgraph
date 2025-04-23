@@ -31,8 +31,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"   # main FastAPI
-      - "8001:8001"   # Claude transport
+      - "8000:8000"   # serves both REST and MCP SSE at /messages
     volumes:
       - ./app:/app/app
       - ./logs:/app/logs

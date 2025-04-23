@@ -44,18 +44,19 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black",
-    "isort",
-    "flake8",
-    "ruff",
-    "djlint==1.36.4",
+  "black",
+  "isort",
+  "flake8",
+  "ruff",
+  "djlint==1.36.4",
 ]
 
 examples = [
-    "langchain-core>=0.3.0",          # for langchain_core.messages
-    "langchain-ollama>=0.1.0",        # for ChatOllama
-    "langchain-mcp-adapters<=0.0.9",  # for MultiServerMCPClient
+  "langchain-core>=0.3.0",           # for langchain_core.messages
+  "langchain-ollama>=0.1.0",         # for ChatOllama
+  "langchain-mcp-adapters>=0.0.1,<0.1.0",   # for MultiServerMCPClient
 ]
+
 
 [dependency-groups]
 test = [
