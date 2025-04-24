@@ -17,7 +17,6 @@ from langchain_core.messages import (
     ToolMessage,
     convert_to_openai_messages,
 )
-from langchain_openai import ChatOpenAI
 from langfuse.callback import CallbackHandler
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import (
@@ -33,6 +32,7 @@ from app.core.config import (
     Environment,
     settings,
 )
+from app.core.langgraph.llm_provider import get_llm
 from app.core.langgraph.tools import tools
 from app.core.logging import logger
 from app.core.prompts import SYSTEM_PROMPT
@@ -40,10 +40,116 @@ from app.schemas import (
     GraphState,
     Message,
 )
+from app.services.mcp.nba_mcp.nba_server import mcp_server
 from app.utils import (
     dump_messages,
     prepare_messages,
 )
+
+
+async def get_mcp_tools():
+    """Get tools from the MCP NBA server.
+    
+    Returns:
+        List of MCP tools for the LangGraph agent.
+    """
+    return await mcp_server.get_tools()
+
+
+async def configure_graph():
+    """Configure a LangGraph workflow with NBA MCP tools."""
+
+    # 1) Load the LLM
+    llm = get_llm()
+    
+    # 2) Fetch and normalize MCP tools
+    raw_mcp = await get_mcp_tools()
+    if isinstance(raw_mcp, dict):
+        mcp_tools = list(raw_mcp.values())
+    else:
+        mcp_tools = raw_mcp
+    logger.info(f"Loaded {len(mcp_tools)} MCP tools for standalone graph")
+    
+    # 3) Convert MCP tools into OpenAI‐compatible function definitions
+    mcp_fn_defs = []
+    for t in mcp_tools:
+        schema = getattr(t, "parameters", {})  # should be a dict with 'properties' & 'required'
+        mcp_fn_defs.append({
+            "name": t.name,
+            "description": getattr(t, "description", "") or "",
+            "parameters": {
+                "title": t.name,
+                "description": getattr(t, "description", "") or "",
+                "type": "object",
+                **schema
+            }
+        })
+
+    # 4) Combine your built‐in tools (already OpenAI‐compatible) + MCP function defs
+    fn_defs = tools + mcp_fn_defs
+    bound_llm = llm.bind_tools(fn_defs)
+    
+    # 5) Build lookup by name for *actual* tool objects
+    tools_by_name = {tool.name: tool for tool in tools}
+    for t in mcp_tools:
+        tools_by_name[t.name] = t
+    
+    # 6) Define chat node
+    async def chat(state):
+        messages = prepare_messages(state["messages"], bound_llm, SYSTEM_PROMPT)
+        try:
+            return {"messages": [await bound_llm.ainvoke(dump_messages(messages))]}
+        except Exception as e:
+            logger.error(f"Error in chat node: {e}")
+            raise
+
+    # 7) Define tool call node
+    async def tool_call(state):
+        outputs = []
+        for call in state["messages"][-1].tool_calls:
+            tool_name = call["name"]
+            args = call["args"]
+            
+            if tool_name not in tools_by_name:
+                result = f"Error: Tool '{tool_name}' not found"
+                logger.error(f"Tool not found: {tool_name}")
+            else:
+                tool = tools_by_name[tool_name]
+                try:
+                    # Handle different tool invocation patterns
+                    if hasattr(tool, "ainvoke"):
+                        result = await tool.ainvoke(args)
+                    elif hasattr(tool, "arun"):
+                        result = await tool.arun(**args)
+                    elif hasattr(tool, "run_async"):
+                        result = await tool.run_async(args)
+                    else:
+                        # Fallback to synchronous run
+                        result = tool.run(**args)
+                except Exception as e:
+                    result = f"Error executing tool '{tool_name}': {str(e)}"
+                    logger.error(f"Tool execution error: {e}")
+                    
+            outputs.append(
+                ToolMessage(content=result, name=tool_name, tool_call_id=call["id"])
+            )
+        return {"messages": outputs}
+
+    # 8) Termination logic
+    def should_continue(state):
+        return "end" if not state["messages"][-1].tool_calls else "continue"
+    
+    # 9) Build the StateGraph
+    graph = StateGraph(dict)
+    graph.add_node("chat", chat)
+    graph.add_node("tool_call", tool_call)
+    graph.add_conditional_edges("chat", should_continue, {"continue": "tool_call", "end": END})
+    graph.add_edge("tool_call", "chat")
+    graph.set_entry_point("chat")
+    graph.set_finish_point("chat")
+
+    # 10) Compile & return
+    return graph.compile(name=f"{settings.PROJECT_NAME} Example Agent")
 
 
 class LangGraphAgent:
@@ -55,19 +161,14 @@ class LangGraphAgent:
 
     def __init__(self):
         """Initialize the LangGraph Agent with necessary components."""
-        # Use environment-specific LLM model
-        self.llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            temperature=settings.DEFAULT_LLM_TEMPERATURE,
-            api_key=settings.LLM_API_KEY,
-            max_tokens=settings.MAX_TOKENS,
-            **self._get_model_kwargs(),
-        ).bind_tools(tools)
+        # Use the modular LLM provider
+        self.llm = get_llm().bind_tools(tools)
         self.tools_by_name = {tool.name: tool for tool in tools}
         self._connection_pool: Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
+        self._mcp_tools = None
 
-        logger.info("llm_initialized", model=settings.LLM_MODEL, environment=settings.ENVIRONMENT.value)
+        logger.info("llm_initialized", model=settings.model_name, environment=settings.app_env)
 
     def _get_model_kwargs(self) -> Dict[str, Any]:
         """Get environment-specific model kwargs.
@@ -78,11 +179,11 @@ class LangGraphAgent:
         model_kwargs = {}
 
         # Development - we can use lower speeds for cost savings
-        if settings.ENVIRONMENT == Environment.DEVELOPMENT:
+        if settings.app_env == Environment.DEVELOPMENT.value:
             model_kwargs["top_p"] = 0.8
 
         # Production - use higher quality settings
-        elif settings.ENVIRONMENT == Environment.PRODUCTION:
+        elif settings.app_env == Environment.PRODUCTION.value:
             model_kwargs["top_p"] = 0.95
             model_kwargs["presence_penalty"] = 0.1
             model_kwargs["frequency_penalty"] = 0.1
@@ -98,10 +199,10 @@ class LangGraphAgent:
         if self._connection_pool is None:
             try:
                 # Configure pool size based on environment
-                max_size = settings.POSTGRES_POOL_SIZE
+                max_size = settings.postgres_pool_size
 
                 self._connection_pool = AsyncConnectionPool(
-                    settings.POSTGRES_URL,
+                    settings.postgres_url,
                     open=False,
                     max_size=max_size,
                     kwargs={
@@ -111,12 +212,12 @@ class LangGraphAgent:
                     },
                 )
                 await self._connection_pool.open()
-                logger.info("connection_pool_created", max_size=max_size, environment=settings.ENVIRONMENT.value)
+                logger.info("connection_pool_created", max_size=max_size, environment=settings.app_env)
             except Exception as e:
-                logger.error("connection_pool_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
+                logger.error("connection_pool_creation_failed", error=str(e), environment=settings.app_env)
                 # In production, we might want to degrade gracefully
-                if settings.ENVIRONMENT == Environment.PRODUCTION:
-                    logger.warning("continuing_without_connection_pool", environment=settings.ENVIRONMENT.value)
+                if settings.app_env == Environment.PRODUCTION.value:
+                    logger.warning("continuing_without_connection_pool", environment=settings.app_env)
                     return None
                 raise e
         return self._connection_pool
@@ -135,7 +236,7 @@ class LangGraphAgent:
         llm_calls_num = 0
 
         # Configure retry attempts based on environment
-        max_retries = settings.MAX_LLM_CALL_RETRIES
+        max_retries = settings.max_llm_call_retries
 
         for attempt in range(max_retries):
             try:
@@ -144,8 +245,8 @@ class LangGraphAgent:
                     "llm_response_generated",
                     session_id=state.session_id,
                     llm_calls_num=llm_calls_num + 1,
-                    model=settings.LLM_MODEL,
-                    environment=settings.ENVIRONMENT.value,
+                    model=settings.model_name,
+                    environment=settings.app_env,
                 )
                 return generated_state
             except OpenAIError as e:
@@ -155,17 +256,22 @@ class LangGraphAgent:
                     attempt=attempt + 1,
                     max_retries=max_retries,
                     error=str(e),
-                    environment=settings.ENVIRONMENT.value,
+                    environment=settings.app_env,
                 )
                 llm_calls_num += 1
 
                 # In production, we might want to fall back to a more reliable model
-                if settings.ENVIRONMENT == Environment.PRODUCTION and attempt == max_retries - 2:
-                    fallback_model = "gpt-4o"
-                    logger.warning(
-                        "using_fallback_model", model=fallback_model, environment=settings.ENVIRONMENT.value
-                    )
-                    self.llm.model_name = fallback_model
+                if settings.app_env == Environment.PRODUCTION.value and attempt == max_retries - 2:
+                    # Only apply this fallback for OpenAI models
+                    if settings.llm_provider.lower() == "openai":
+                        fallback_model = "gpt-4o"
+                        logger.warning(
+                            "using_fallback_model", model=fallback_model, environment=settings.app_env
+                        )
+                        # Re-initialize the LLM with the fallback model
+                        temp_settings = settings.model_copy(update={"model_name": fallback_model})
+                        with settings._set_temporary(temp_settings):
+                            self.llm = get_llm().bind_tools(tools)
 
                 continue
 
@@ -183,11 +289,39 @@ class LangGraphAgent:
         """
         outputs = []
         for tool_call in state.messages[-1].tool_calls:
-            tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+            tool_name = tool_call["name"]
+            args = tool_call["args"]
+            
+            if tool_name in self.tools_by_name:
+                tool = self.tools_by_name[tool_name]
+            elif self._mcp_tools and tool_name in self._mcp_tools:
+                tool = self._mcp_tools[tool_name]
+            else:
+                tool = None
+                
+            if tool is None:
+                tool_result = f"Error: Tool '{tool_name}' not found"
+                logger.error(f"Tool not found: {tool_name}")
+            else:
+                try:
+                    # Handle different tool invocation patterns
+                    if hasattr(tool, "ainvoke"):
+                        tool_result = await tool.ainvoke(args)
+                    elif hasattr(tool, "arun"):
+                        tool_result = await tool.arun(**args)
+                    elif hasattr(tool, "run_async"):
+                        tool_result = await tool.run_async(args)
+                    else:
+                        # Fallback to synchronous run
+                        tool_result = tool.run(**args)
+                except Exception as e:
+                    tool_result = f"Error executing tool '{tool_name}': {str(e)}"
+                    logger.error(f"Tool execution error: {e}")
+                
             outputs.append(
                 ToolMessage(
                     content=tool_result,
-                    name=tool_call["name"],
+                    name=tool_name,
                     tool_call_id=tool_call["id"],
                 )
             )
@@ -212,55 +346,109 @@ class LangGraphAgent:
             return "continue"
 
     async def create_graph(self) -> Optional[CompiledStateGraph]:
-        """Create and configure the LangGraph workflow.
+        """Create and configure the LangGraph workflow with MCP tools."""
 
-        Returns:
-            Optional[CompiledStateGraph]: The configured LangGraph instance or None if init fails
-        """
         if self._graph is None:
-            try:
-                graph_builder = StateGraph(GraphState)
-                graph_builder.add_node("chat", self._chat)
-                graph_builder.add_node("tool_call", self._tool_call)
-                graph_builder.add_conditional_edges(
-                    "chat",
-                    self._should_continue,
-                    {"continue": "tool_call", "end": END},
-                )
-                graph_builder.add_edge("tool_call", "chat")
-                graph_builder.set_entry_point("chat")
-                graph_builder.set_finish_point("chat")
+            # 1) Fetch and normalize MCP tools
+            raw_mcp = await get_mcp_tools()
+            mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+            self._mcp_tools = {t.name: t for t in mcp_tools}
+            logger.info(f"Loaded {len(mcp_tools)} MCP tools")
 
-                # Get connection pool (may be None in production if DB unavailable)
-                connection_pool = await self._get_connection_pool()
-                if connection_pool:
-                    checkpointer = AsyncPostgresSaver(connection_pool)
-                    await checkpointer.setup()
-                else:
-                    # In production, proceed without checkpointer if needed
-                    checkpointer = None
-                    if settings.ENVIRONMENT != Environment.PRODUCTION:
-                        raise Exception("Connection pool initialization failed")
+            # 2) Build OpenAI‐compatible function defs for binding
+            mcp_fn_defs = []
+            for t in mcp_tools:
+                schema = getattr(t, "parameters", {})
+                mcp_fn_defs.append({
+                    "name": t.name,
+                    "description": getattr(t, "description", "") or "",
+                    "parameters": {
+                        "title": t.name,
+                        "description": getattr(t, "description", "") or "",
+                        "type": "object",
+                        **schema
+                    }
+                })
 
-                self._graph = graph_builder.compile(
-                    checkpointer=checkpointer, name=f"{settings.PROJECT_NAME} Agent ({settings.ENVIRONMENT.value})"
-                )
+            # 3) Bind only function defs, not raw tool objects
+            fn_defs = tools + mcp_fn_defs
+            self.llm = get_llm().bind_tools(fn_defs)
 
-                logger.info(
-                    "graph_created",
-                    graph_name=f"{settings.PROJECT_NAME} Agent",
-                    environment=settings.ENVIRONMENT.value,
-                    has_checkpointer=checkpointer is not None,
-                )
-            except Exception as e:
-                logger.error("graph_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
-                # In production, we don't want to crash the app
-                if settings.ENVIRONMENT == Environment.PRODUCTION:
-                    logger.warning("continuing_without_graph")
-                    return None
-                raise e
+            # 4) Update tools_by_name for actual execution
+            self.tools_by_name = {tool.name: tool for tool in tools}
+            self.tools_by_name.update(self._mcp_tools)
+
+            # Define a wrapped tool call function that properly invokes tools
+            async def wrapped_tool_call(state: GraphState) -> dict:
+                outputs = []
+                for tool_call in state.messages[-1].tool_calls:
+                    tool_name = tool_call["name"]
+                    args = tool_call["args"]
+                    
+                    if tool_name in self.tools_by_name:
+                        tool = self.tools_by_name[tool_name]
+                    elif self._mcp_tools and tool_name in self._mcp_tools:
+                        tool = self._mcp_tools[tool_name]
+                    else:
+                        tool = None
+                        
+                    if tool is None:
+                        tool_result = f"Error: Tool '{tool_name}' not found"
+                        logger.error(f"Tool not found: {tool_name}")
+                    else:
+                        try:
+                            # Handle different tool invocation patterns
+                            if hasattr(tool, "ainvoke"):
+                                tool_result = await tool.ainvoke(args)
+                            elif hasattr(tool, "arun"):
+                                tool_result = await tool.arun(**args)
+                            elif hasattr(tool, "run_async"):
+                                tool_result = await tool.run_async(args)
+                            else:
+                                # Fallback to synchronous run
+                                tool_result = tool.run(**args)
+                        except Exception as e:
+                            tool_result = f"Error executing tool '{tool_name}': {str(e)}"
+                            logger.error(f"Tool execution error: {e}")
+                        
+                    outputs.append(
+                        ToolMessage(
+                            content=tool_result,
+                            name=tool_name,
+                            tool_call_id=tool_call["id"],
+                        )
+                    )
+                return {"messages": outputs}
+
+            # … rest of your graph creation (unchanged) …
+            graph_builder = StateGraph(GraphState)
+            graph_builder.add_node("chat", self._chat)
+            graph_builder.add_node("tool_call", wrapped_tool_call)
+            graph_builder.add_conditional_edges(
+                "chat", self._should_continue, {"continue": "tool_call", "end": END}
+            )
+            graph_builder.add_edge("tool_call", "chat")
+            graph_builder.set_entry_point("chat")
+            graph_builder.set_finish_point("chat")
+
+            # 5) (Optional) Checkpointer setup...
+            connection_pool = await self._get_connection_pool()
+            if connection_pool:
+                checkpointer = AsyncPostgresSaver(connection_pool)
+                await checkpointer.setup()
+            else:
+                checkpointer = None
+                if settings.app_env != Environment.PRODUCTION.value:
+                    raise Exception("Connection pool initialization failed")
+
+            self._graph = graph_builder.compile(
+                checkpointer=checkpointer,
+                name=f"{settings.PROJECT_NAME} Agent ({settings.app_env})"
+            )
+            logger.info("graph_created", graph_name=self._graph.name)
 
         return self._graph
+
 
     async def get_response(
         self,
@@ -284,7 +472,7 @@ class LangGraphAgent:
             "configurable": {"thread_id": session_id},
             "callbacks": [
                 CallbackHandler(
-                    environment=settings.ENVIRONMENT.value,
+                    environment=settings.app_env,
                     debug=False,
                     user_id=user_id,
                     session_id=session_id,
@@ -317,7 +505,7 @@ class LangGraphAgent:
             "configurable": {"thread_id": session_id},
             "callbacks": [
                 CallbackHandler(
-                    environment=settings.ENVIRONMENT.value, debug=False, user_id=user_id, session_id=session_id
+                    environment=settings.app_env, debug=False, user_id=user_id, session_id=session_id
                 )
             ],
         }
@@ -379,7 +567,7 @@ class LangGraphAgent:
 
             # Use a new connection for this specific operation
             async with conn_pool.connection() as conn:
-                for table in settings.CHECKPOINT_TABLES:
+                for table in settings.checkpoint_tables:
                     try:
                         await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
                         logger.info(f"Cleared {table} for session {session_id}")

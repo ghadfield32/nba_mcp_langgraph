@@ -6,17 +6,10 @@ for the application. It includes environment detection, .env file loading, and
 configuration value parsing.
 """
 
-import json
 import os
 from enum import Enum
 from pathlib import Path
-from typing import (
-    Any,
-    Dict,
-    List,
-    Optional,
-    Union,
-)
+from typing import List
 
 from dotenv import load_dotenv
 
@@ -30,10 +23,9 @@ class Environment(str, Enum):
     """
 
     DEVELOPMENT = "development"
-    STAGING = "staging"
-    PRODUCTION = "production"
-    TEST = "test"
-
+    STAGING     = "staging"
+    PRODUCTION  = "production"
+    TEST        = "test"
 
 # Determine environment
 def get_environment() -> Environment:
@@ -43,80 +35,36 @@ def get_environment() -> Environment:
         Environment: The current environment (development, staging, production, or test)
     """
     match os.getenv("APP_ENV", "development").lower():
-        case "production" | "prod":
-            return Environment.PRODUCTION
-        case "staging" | "stage":
-            return Environment.STAGING
-        case "test":
-            return Environment.TEST
-        case _:
-            return Environment.DEVELOPMENT
-
+        case "production" | "prod": return Environment.PRODUCTION
+        case "staging" | "stage":  return Environment.STAGING
+        case "test":                return Environment.TEST
+        case _:                     return Environment.DEVELOPMENT
 
 # Load appropriate .env file based on environment
 def load_env_file():
     """Load environment-specific .env file."""
-    env = get_environment()
-    print(f"Loading environment: {env}")
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    env = get_environment().value
+    candidates = [f".env.{env}.local", f".env.{env}", ".env.local", ".env"]
+    for fn in candidates:
+        if Path(fn).is_file():
+            load_dotenv(fn)
+            print(f"Loaded {fn}")
+            return
+    print("No .env file loaded")
 
-    # Define env files in priority order
-    env_files = [
-        os.path.join(base_dir, f".env.{env.value}.local"),
-        os.path.join(base_dir, f".env.{env.value}"),
-        os.path.join(base_dir, ".env.local"),
-        os.path.join(base_dir, ".env"),
-    ]
+load_env_file()
 
-    # Load the first env file that exists
-    for env_file in env_files:
-        if os.path.isfile(env_file):
-            load_dotenv(dotenv_path=env_file)
-            print(f"Loaded environment from {env_file}")
-            return env_file
-
-    # Fall back to default if no env file found
-    return None
-
-
-ENV_FILE = load_env_file()
-
-
-# Parse list values from environment variables
-def parse_list_from_env(env_key, default=None):
-    """Parse a comma-separated list from an environment variable."""
-    value = os.getenv(env_key)
+def parse_list(value: str, default: List[str]):
+    """Parse a list from a string value with robust handling."""
     if not value:
-        return default or []
-
-    # Remove quotes if they exist
-    value = value.strip("\"'")
-    # Handle single value case
-    if "," not in value:
-        return [value]
-    # Split comma-separated values
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-# Parse dict of lists from environment variables with prefix
-def parse_dict_of_lists_from_env(prefix, default_dict=None):
-    """Parse dictionary of lists from environment variables with a common prefix."""
-    result = default_dict or {}
-
-    # Look for all env vars with the given prefix
-    for key, value in os.environ.items():
-        if key.startswith(prefix):
-            endpoint = key[len(prefix) :].lower()  # Extract endpoint name
-            # Parse the values for this endpoint
-            if value:
-                value = value.strip("\"'")
-                if "," in value:
-                    result[endpoint] = [item.strip() for item in value.split(",") if item.strip()]
-                else:
-                    result[endpoint] = [value]
-
-    return result
-
+        return default
+    # strip quotes
+    value = value.strip('"').strip("'")
+    # JSON-style?
+    if value.startswith("[") and value.endswith("]"):
+        return [x.strip().strip('"').strip("'") for x in value[1:-1].split(",") if x.strip()]
+    # comma-separated
+    return [x.strip() for x in value.split(",") if x.strip()]
 
 class Settings:
     """Application settings without using pydantic."""
@@ -128,33 +76,40 @@ class Settings:
         with appropriate defaults for each setting. Also applies
         environment-specific overrides based on the current environment.
         """
-        # Set the environment
+        # ---- Core ----
         self.ENVIRONMENT = get_environment()
-
-        # Application Settings
+        # for backward-compatibility with any code still using .app_env:
+        self.app_env = self.ENVIRONMENT.value
         self.PROJECT_NAME = os.getenv("PROJECT_NAME", "FastAPI LangGraph Template")
-        self.VERSION = os.getenv("VERSION", "1.0.0")
+        self.VERSION      = os.getenv("VERSION", "1.0.0")
         self.DESCRIPTION = os.getenv(
             "DESCRIPTION", "A production-ready FastAPI template with LangGraph and Langfuse integration"
         )
-        self.API_V1_STR = os.getenv("API_V1_STR", "/api/v1")
-        self.DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "t", "yes")
-
-        # CORS Settings
-        self.ALLOWED_ORIGINS = parse_list_from_env("ALLOWED_ORIGINS", ["*"])
-
-        # Langfuse Configuration
-        self.LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-        self.LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
-        self.LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
-
-        # LangGraph Configuration
-        self.LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-        self.LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
-        self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
-        self.MAX_LLM_CALL_RETRIES = int(os.getenv("MAX_LLM_CALL_RETRIES", "3"))
-
+        self.API_V1_STR   = os.getenv("API_V1_STR", "/api/v1")
+        self.DEBUG        = os.getenv("DEBUG", "false").lower() in ("true","1")
+        
+        # ---- CORS ----
+        raw = os.getenv("ALLOWED_ORIGINS", "")
+        self.ALLOWED_ORIGINS = parse_list(raw, ["*"])
+        
+        # ---- Langfuse ----
+        self.LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY","")
+        self.LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY","")
+        self.LANGFUSE_HOST       = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+        
+        # ---- LLM Providers ----
+        self.llm_provider      = os.getenv("LLM_PROVIDER", "openai").lower()
+        self.openai_api_key    = os.getenv("OPENAI_API_KEY","")
+        self.groq_api_key      = os.getenv("GROQ_API_KEY","")
+        self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY","")
+        self.ollama_host       = os.getenv("OLLAMA_HOST","http://localhost:11434")
+        
+        # ---- Model settings ----
+        self.model_name              = os.getenv("LLM_MODEL","gpt-4o-mini")
+        self.default_llm_temperature = float(os.getenv("DEFAULT_LLM_TEMPERATURE","0.2"))
+        self.max_tokens              = int(os.getenv("MAX_TOKENS","2000"))
+        self.max_llm_call_retries    = int(os.getenv("MAX_LLM_CALL_RETRIES","3"))
+        
         # JWT Configuration
         self.JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
         self.JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
@@ -172,7 +127,7 @@ class Settings:
         self.CHECKPOINT_TABLES = ["checkpoint_blobs", "checkpoint_writes", "checkpoints"]
 
         # Rate Limiting Configuration
-        self.RATE_LIMIT_DEFAULT = parse_list_from_env("RATE_LIMIT_DEFAULT", ["200 per day", "50 per hour"])
+        self.RATE_LIMIT_DEFAULT = parse_list(os.getenv("RATE_LIMIT_DEFAULT", ""), ["200 per day", "50 per hour"])
 
         # Rate limit endpoints defaults
         default_endpoints = {
@@ -189,56 +144,40 @@ class Settings:
         self.RATE_LIMIT_ENDPOINTS = default_endpoints.copy()
         for endpoint in default_endpoints:
             env_key = f"RATE_LIMIT_{endpoint.upper()}"
-            value = parse_list_from_env(env_key)
+            value = parse_list(os.getenv(env_key, ""), [])
             if value:
                 self.RATE_LIMIT_ENDPOINTS[endpoint] = value
 
         # Evaluation Configuration
         self.EVALUATION_LLM = os.getenv("EVALUATION_LLM", "gpt-4o-mini")
         self.EVALUATION_BASE_URL = os.getenv("EVALUATION_BASE_URL", "https://api.openai.com/v1")
-        self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.LLM_API_KEY)
+        self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.openai_api_key)
         self.EVALUATION_SLEEP_TIME = int(os.getenv("EVALUATION_SLEEP_TIME", "10"))
 
-        # Apply environment-specific settings
+        # Finally, adjust per‐environment overrides:
         self.apply_environment_settings()
 
     def apply_environment_settings(self):
         """Apply environment-specific settings based on the current environment."""
-        env_settings = {
-            Environment.DEVELOPMENT: {
-                "DEBUG": True,
-                "LOG_LEVEL": "DEBUG",
-                "LOG_FORMAT": "console",
-                "RATE_LIMIT_DEFAULT": ["1000 per day", "200 per hour"],
-            },
-            Environment.STAGING: {
-                "DEBUG": False,
-                "LOG_LEVEL": "INFO",
-                "RATE_LIMIT_DEFAULT": ["500 per day", "100 per hour"],
-            },
-            Environment.PRODUCTION: {
-                "DEBUG": False,
-                "LOG_LEVEL": "WARNING",
-                "RATE_LIMIT_DEFAULT": ["200 per day", "50 per hour"],
-            },
-            Environment.TEST: {
-                "DEBUG": True,
-                "LOG_LEVEL": "DEBUG",
-                "LOG_FORMAT": "console",
-                "RATE_LIMIT_DEFAULT": ["1000 per day", "1000 per hour"],  # Relaxed for testing
-            },
-        }
-
-        # Get settings for current environment
-        current_env_settings = env_settings.get(self.ENVIRONMENT, {})
-
-        # Apply settings if not explicitly set in environment variables
-        for key, value in current_env_settings.items():
-            env_var_name = key.upper()
-            # Only override if environment variable wasn't explicitly set
-            if env_var_name not in os.environ:
-                setattr(self, key, value)
+        if self.ENVIRONMENT is Environment.DEVELOPMENT:
+            self.DEBUG = True
+            self.LOG_LEVEL = "DEBUG"
+            self.LOG_FORMAT = "console"
+            self.RATE_LIMIT_DEFAULT = ["1000 per day", "200 per hour"]
+        elif self.ENVIRONMENT is Environment.STAGING:
+            self.DEBUG = False
+            self.LOG_LEVEL = "INFO"
+            self.RATE_LIMIT_DEFAULT = ["500 per day", "100 per hour"]
+        elif self.ENVIRONMENT is Environment.PRODUCTION:
+            self.DEBUG = False
+            self.LOG_LEVEL = "WARNING"
+            self.RATE_LIMIT_DEFAULT = ["200 per day", "50 per hour"]
+        elif self.ENVIRONMENT is Environment.TEST:
+            self.DEBUG = True
+            self.LOG_LEVEL = "DEBUG"
+            self.LOG_FORMAT = "console"
+            self.RATE_LIMIT_DEFAULT = ["1000 per day", "1000 per hour"]  # Relaxed for testing
 
 
-# Create settings instance
+# instantiate a global
 settings = Settings()

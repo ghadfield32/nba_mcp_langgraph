@@ -8,6 +8,8 @@ from fastapi import APIRouter
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.chatbot import router as chatbot_router
+
+# Keep this import for diagnostic purposes even if we don't include the router
 from app.api.v1.mcp_router import router as mcp_router
 from app.core.logging import logger
 from app.services.mcp.nba_mcp.nba_server import mcp_server  # <<-- import your SSE app
@@ -17,7 +19,7 @@ api_router = APIRouter()
 # Include your existing REST routers
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(chatbot_router, prefix="/chatbot", tags=["chatbot"])
-api_router.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
+# api_router.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 
 # Use API router's mount method to add the MCP SSE app 
 # IMPORTANT: The ASGI app expects paths like /messages/{resource}, 
@@ -35,6 +37,26 @@ async def mcp_sse_help():
         "example": "/api/v1/mcp-sse/messages/api-docs://openapi.json?session_id=your_session_id",
         "note": "Most MCP resources require a session_id query parameter"
     }
+
+# Add a diagnostic endpoint to check MCP resources and tools
+@api_router.get("/mcp-sse/diagnostic", tags=["mcp"])
+async def mcp_diagnostic():
+    """Diagnostic endpoint to check MCP resources and tools."""
+    logger.info("mcp_diagnostic_called")
+    try:
+        resources = await mcp_server.get_resources()
+        tools = await mcp_server.get_tools()
+        return {
+            "resources": resources,
+            "tools": [t.name for t in tools],
+            "status": "healthy"
+        }
+    except Exception as e:
+        logger.error(f"Error in mcp_diagnostic: {str(e)}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 @api_router.get("/health")
 async def health_check():
@@ -121,4 +143,53 @@ async def usage_guide():
                 "solution": "Create a new session using the /api/v1/auth/session endpoint"
             }
         ]
+    }
+
+@api_router.get("/mcp-architecture", tags=["docs"])
+async def mcp_architecture():
+    """Documentation for MCP architecture and integration with LangGraph."""
+    logger.info("mcp_architecture_docs_called")
+    return {
+        "title": "MCP Architecture & Integration",
+        "description": "How MCP is integrated with LangGraph and FastAPI",
+        "architecture": [
+            {
+                "component": "FastMCP Server (nba_server.py)",
+                "description": "Provides NBA data via MCP resources and tools",
+                "features": [
+                    "Exposes NBA stats as resources like player stats, league leaders",
+                    "Provides tools callable by LangChain/LangGraph",
+                    "Serves on port set by NBA_MCP_PORT (default 8000)"
+                ]
+            },
+            {
+                "component": "FastAPI Integration",
+                "description": "Two integration methods:",
+                "methods": [
+                    {
+                        "type": "SSE Integration",
+                        "endpoint": "/api/v1/mcp-sse/messages/{resource_path}",
+                        "description": "Used by LangGraph for streaming tool calls",
+                        "note": "Primary method for agent interaction"
+                    },
+                    {
+                        "type": "REST Integration (optional)",
+                        "endpoint": "/api/v1/mcp/* (commented out)",
+                        "description": "Direct REST calls to MCP functions",
+                        "note": "Not needed when using LangGraph, but useful for testing"
+                    }
+                ]
+            },
+            {
+                "component": "LangGraph Agent",
+                "description": "Uses LangChain/LangGraph with the LLM provider and MCP tools",
+                "details": [
+                    "Configured in app/core/langgraph/graph.py",
+                    "Uses tools defined in the MCP server",
+                    "Accesses MCP via SSE transport at /mcp-sse/messages",
+                    "Example in examples/langgraph_ollama_agent_w_tools.py"
+                ]
+            }
+        ],
+        "recommended_usage": "For AI agent applications, use the LangGraph integration pattern rather than calling the REST endpoints directly"
     }

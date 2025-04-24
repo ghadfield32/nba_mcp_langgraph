@@ -39,6 +39,10 @@ dependencies = [
     "pandas>=2.2.3",
     "pydantic>=2.11.3",
     "python-dotenv>=1.1.0",
+    "langchain-groq>=0.1.5",
+    "langchain-anthropic>=0.1.12",
+    "langchain-mcp-adapters>=0.0.1,<0.1.0",
+    "transformers>=4.35.0",
     
 ]
 
@@ -54,7 +58,6 @@ dev = [
 examples = [
   "langchain-core>=0.3.0",           # for langchain_core.messages
   "langchain-ollama>=0.1.0",         # for ChatOllama
-  "langchain-mcp-adapters>=0.0.1,<0.1.0",   # for MultiServerMCPClient
 ]
 
 

@@ -18,7 +18,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_ollama import ChatOllama
 from langgraph.graph import (
     END,
     START,
@@ -26,14 +25,25 @@ from langgraph.graph import (
     StateGraph,
 )
 
+from app.core.config import settings
+
+# Import the LLM provider from our app
+from app.core.langgraph.llm_provider import get_llm
+
 # ── 1) Simplified port configuration - always use port 8000 ───────────────────
 MCP_PORT = int(os.getenv("NBA_MCP_PORT", "8000"))
 MCP_URL  = f"http://localhost:{MCP_PORT}/mcp/messages"
 
 
+# Load environment variables
 load_dotenv()
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-llm = ChatOllama(host=OLLAMA_HOST, model="llama3.2:3b", timeout=30)
+
+# Configure the provider in settings if needed from environment variables
+if "OLLAMA_HOST" in os.environ:
+    settings.ollama_base_url = os.environ["OLLAMA_HOST"]
+    
+# Use our modular LLM provider
+llm = get_llm()
 
 def wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
     end = time.time() + timeout

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import (
     APIRouter,
     Query,
@@ -15,7 +17,7 @@ from app.services.mcp.nba_mcp.nba_server import (
 router = APIRouter()
 
 @router.get("/player-career")
-async def player_career_info(player_name: str, season: str = None):
+async def player_career_info(player_name: str, season: Optional[str] = None):
     """Fetch player career information via MCP."""
     result = await get_player_career_information(player_name, season)
     return {"result": result}
@@ -27,24 +29,24 @@ async def league_leaders_info(params: LeagueLeadersParams):
     return {"result": result}
 
 @router.get("/live-scores")
-async def live_scores(target_date: str = Query(None)):
+async def live_scores(target_date: Optional[str] = Query(None)):
     """Fetch live or historical scores."""
     result = await get_live_scores(target_date)
     return {"result": result}
 
 @router.get("/game-logs")
-async def game_logs(season: str, team: str = None, date_from: str = None, date_to: str = None):
+async def game_logs(season: str, team: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None):
     """Get game logs for date range or team."""
     result = await get_date_range_game_log_or_team_game_log(season, team, date_from, date_to)
     return {"result": result}
 
 @router.get("/play-by-play")
 async def play_by_play_endpoint(
-    game_date: str = None,
-    team: str = None,
+    game_date: Optional[str] = None,
+    team: Optional[str] = None,
     start_period: int = 1,
     end_period: int = 4,
-    start_clock: str = None,
+    start_clock: Optional[str] = None,
     recent_n: int = 5,
     max_lines: int = 200
 ):

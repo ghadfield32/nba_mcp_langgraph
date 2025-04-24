@@ -34,7 +34,7 @@ def prepare_messages(messages: list[Message], llm: BaseChatModel, system_prompt:
         dump_messages(messages),
         strategy="last",
         token_counter=llm,
-        max_tokens=settings.MAX_TOKENS,
+        max_tokens=settings.max_tokens,
         start_on="human",
         include_system=False,
         allow_partial=False,
