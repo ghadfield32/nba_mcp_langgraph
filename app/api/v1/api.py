@@ -19,7 +19,7 @@ api_router = APIRouter()
 # Include your existing REST routers
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(chatbot_router, prefix="/chatbot", tags=["chatbot"])
-# api_router.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
+api_router.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 
 # Use API router's mount method to add the MCP SSE app 
 # IMPORTANT: The ASGI app expects paths like /messages/{resource}, 
