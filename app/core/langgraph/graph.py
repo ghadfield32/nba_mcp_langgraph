@@ -3,7 +3,9 @@
 location: app\core\langgraph\graph.py
 """
 
+import ast
 import inspect
+import json
 from typing import (
     Any,
     AsyncGenerator,
@@ -148,6 +150,70 @@ async def configure_graph():
 
             logger.info(f"[DEBUG] Calling tool '{tool_name}' with args keys: {list(args.keys())}")
 
+            # Special case: If args has a 'params' key, parse it if it's a string
+            if "params" in args and isinstance(args["params"], str):
+                raw_params = args["params"]
+                logger.info("[DEBUG] Found 'params' key with string value, attempting to parse")
+                try:
+                    # First try JSON parsing
+                    args["params"] = json.loads(raw_params)
+                    logger.info("[DEBUG] Parsed JSON string to dict")
+                except json.JSONDecodeError:
+                    try:
+                        # If JSON fails, try Python literal_eval for Python dict-like strings
+                        args["params"] = ast.literal_eval(raw_params)
+                        logger.info("[DEBUG] Parsed Python dict-like string using ast.literal_eval")
+                    except (SyntaxError, ValueError):
+                        logger.error(f"[DEBUG] Failed to parse params string: {raw_params}")
+                        # Keep as string - will likely fail but not our fault
+
+            # Special case for get_league_leaders_info: adjust field names if needed
+            if tool_name == "get_league_leaders_info" and "params" in args and isinstance(args["params"], dict):
+                params = args["params"]
+                # Map LLM generated fields to expected field names
+                field_mapping = {
+                    "stat": "stat_category",
+                    "mode": "per_mode",
+                    "points": "PTS",
+                    "per_game": "PerGame",
+                    "totals": "Totals",
+                    "per48": "Per48"
+                }
+                
+                # Create a new params dict with correctly mapped field names
+                fixed_params = {}
+                
+                # Handle stat_category (required)
+                if "stat_category" in params:
+                    fixed_params["stat_category"] = params["stat_category"]
+                elif "stat" in params:
+                    stat_value = params["stat"].upper() if params["stat"].lower() != "points" else "PTS"
+                    fixed_params["stat_category"] = stat_value
+                
+                # Handle per_mode (required)
+                if "per_mode" in params:
+                    fixed_params["per_mode"] = params["per_mode"]
+                elif "mode" in params:
+                    mode_value = params["mode"]
+                    if mode_value.lower() == "per_game":
+                        fixed_params["per_mode"] = "PerGame"
+                    elif mode_value.lower() == "totals":
+                        fixed_params["per_mode"] = "Totals"
+                    elif mode_value.lower() == "per48":
+                        fixed_params["per_mode"] = "Per48"
+                
+                # Handle season (optional)
+                if "season" in params:
+                    season_value = params["season"]
+                    if season_value.lower() == "last" or season_value.lower() == "latest":
+                        # Current NBA season is 2024-25
+                        fixed_params["season"] = "2024-25"
+                    else:
+                        fixed_params["season"] = season_value
+                
+                logger.info(f"[DEBUG] Mapped params from {params} to {fixed_params}")
+                args["params"] = fixed_params
+
             # Inspect the run() signature
             sig = inspect.signature(tool.run)
             # Skip the 'self' parameter
@@ -171,7 +237,12 @@ async def configure_graph():
                         model = ann.parse_raw(payload)
                     result = await tool.run(model)
 
-                # 2) Single-arg MCP tool: hand it the entire dict
+                # 2) Single-arg MCP tool: For tools expecting 'params' object, pass that directly
+                elif name == "context" and "params" in args:
+                    logger.info("[DEBUG] Single-arg MCP tool with 'context' parameter, wrapping params in dict")
+                    # Wrap params in a dict with 'params' key to match expected model structure
+                    result = await tool.run({"params": args["params"]})
+                # 3) Other single-arg tool
                 else:
                     logger.info("[DEBUG] Single-arg MCP tool, passing full args dict")
                     result = await tool.run(args)
