@@ -8,13 +8,20 @@ import ast
 import asyncio
 import inspect
 import json
+import socket
 import sys
 from typing import (
     Any,
     AsyncGenerator,
+    Awaitable,
+    Callable,
     Dict,
     Literal,
     Optional,
+)
+from urllib.parse import (
+    urlparse,
+    urlunparse,
 )
 
 from asgiref.sync import sync_to_async
@@ -50,8 +57,87 @@ from app.schemas import (
 from app.services.mcp.nba_mcp.nba_server import mcp_server
 from app.utils import (
     dump_messages,
+    fix_messages_for_ollama,
     prepare_messages,
 )
+
+# -----------------------------------------------------------------------------
+# Unified tool invoker: maps any tool interface (ainvoke/arun/run/run_async)
+# into a single `await _invoke(tool, args: dict)` call.
+# -----------------------------------------------------------------------------
+
+
+async def _invoke_tool_sync(tool: Any, args: dict) -> Any:
+    """
+    Call `tool.run` *safely* in every signature permutation LangChain supports.
+
+    Resolution order (first one that works wins):
+      1.   run(arguments=<dict>)
+      2.   run(**args)          – including zero-arg `run()`
+    """
+    run_fn: Callable = getattr(tool, "run")
+    try:                                            # ① run(arguments=...)
+        result = run_fn(arguments=args)
+    except TypeError:
+        try:                                        # ② run(**args)  / run()
+            result = run_fn(**args)
+        except TypeError:
+            # Last-ditch effort: maybe the tool takes *no* args at all.
+            result = run_fn()
+
+    if inspect.isawaitable(result):
+        result = await result                      # Handle async def run(...)
+    return result
+
+
+async def _invoke_tool_async(tool: Any, args: dict) -> Any:
+    """
+    Prefer an async entry-point if the tool exposes one; otherwise delegate
+    to `_invoke_tool_sync`.
+
+    Resolution order:
+      1.  ainvoke(input=<str>)         – built-ins like DuckDuckGo
+      2.  ainvoke(arguments=<dict>)    – custom tools following LC function-call
+      3.  ainvoke(**args) / ainvoke()  – rare, but handle it
+      4.  fall back to _invoke_tool_sync
+    """
+    # ---- 1) Fast path: ainvoke ------------------------------------------------
+    if hasattr(tool, "ainvoke"):
+        async_fn: Callable[..., Awaitable] = getattr(tool, "ainvoke")
+        sig = inspect.signature(async_fn)
+        try:
+            if "input" in sig.parameters:           # DuckDuckGo etc.
+                return await async_fn(input=args.get("query") or args or "")
+            elif "arguments" in sig.parameters:     # LangGraph style
+                return await async_fn(arguments=args)
+            else:                                   # kwargs / no-arg style
+                return await async_fn(**args)
+        except TypeError:
+            # Fall through – maybe wrong style; we'll try sync version
+            pass
+
+    # ---- 2) Other async variants ---------------------------------------------
+    for meth in ("arun", "run_async"):
+        if hasattr(tool, meth):
+            result = getattr(tool, meth)(arguments=args)
+            return await result if inspect.isawaitable(result) else result
+
+    # ---- 3) Fallback to sync --------------------------------------------------
+    return await _invoke_tool_sync(tool, args)
+
+
+def normalize_db_url(url: str) -> str:
+    parsed = urlparse(url)
+    host, port = parsed.hostname, parsed.port
+    try:
+        socket.getaddrinfo(host, port)
+        return url
+    except socket.gaierror:
+        if host == "db":
+            new = parsed._replace(netloc=f"{parsed.username}:{parsed.password}@localhost:{port}")
+            return urlunparse(new)
+        raise
+
 
 # Ensure psycopg compatibility on Windows for any late pool creation
 if sys.platform.startswith("win"):
@@ -83,49 +169,36 @@ async def configure_graph():
     # 3) Convert MCP tools into OpenAI‐compatible function definitions
     mcp_fn_defs = []
     for t in mcp_tools:
-        schema = getattr(t, "parameters", {})  # should be a dict with 'properties' & 'required'
+        schema = getattr(t, "parameters", {}) or {}  # Ensure we have a dict even if None
         
         # Debug: Log the original tool schema
         tool_name = getattr(t, "name", "unknown")
         logger.info(f"Processing tool schema for: {tool_name}")
-        logger.info(f"Original schema: {schema}")
+        logger.debug(f"Original schema: {schema}")
         
-        # Special handling for get_league_leaders_info tool
+        # Handle special cases explicitly by tool name
         if tool_name == "get_league_leaders_info":
             logger.info("Applying special schema fix for get_league_leaders_info")
-            # Check if params is in the properties
-            if "params" in schema.get("properties", {}):
-                # This is correct, use as is
-                logger.info("Schema already has 'params' property, keeping as is")
-            else:
-                # Need to restructure schema to expect a "params" object
-                # that contains all the parameters for LeagueLeadersParams
-                logger.info("Restructuring schema to use 'params' wrapper")
-                schema = {
-                    "properties": {
-                        "params": {
-                            "type": "object",
-                            "properties": schema.get("properties", {}),
-                            "required": schema.get("required", [])
-                        }
-                    },
-                    "required": ["params"]
-                }
-                logger.info(f"Updated schema: {schema}")
-        
-        mcp_fn_defs.append({
-            "name": tool_name,
-            "description": getattr(t, "description", "") or "",
-            "parameters": {
-                "title": tool_name,
+            # Don't restructure - keep params at the root level since LLM will invoke it that way
+            mcp_fn_defs.append({
+                "name": tool_name,
                 "description": getattr(t, "description", "") or "",
-                "type": "object",
-                **schema
-            }
-        })
+                "parameters": schema
+            })
+        else:
+            # Default handling for other tools
+            mcp_fn_defs.append({
+                "name": tool_name,
+                "description": getattr(t, "description", "") or "",
+                "parameters": {
+                    "type": "object",
+                    **schema
+                }
+            })
 
-    # 4) Combine your built‐in tools (already OpenAI‐compatible) + MCP function defs
+    # 4) Combine built‐in tools + MCP function defs
     fn_defs = tools + mcp_fn_defs
+    logger.info(f"Binding {len(fn_defs)} total tools/functions to LLM")
     bound_llm = llm.bind_tools(fn_defs)
     
     # 5) Build lookup by name for *actual* tool objects
@@ -137,132 +210,85 @@ async def configure_graph():
     async def chat(state):
         messages = prepare_messages(state["messages"], bound_llm, SYSTEM_PROMPT)
         try:
-            return {"messages": [await bound_llm.ainvoke(dump_messages(messages))]}
+            # Apply Ollama-specific message fixes if using Ollama
+            if (hasattr(bound_llm, "_llm_type") and "ollama" in bound_llm._llm_type.lower()) or \
+               settings.llm_provider.lower() == "ollama":
+                logger.debug("Detected Ollama LLM in standalone chat node, applying message fixes")
+                fixed_messages = fix_messages_for_ollama(messages)
+                
+                # Dump messages to dict format for LLM
+                message_dicts = []
+                for msg in fixed_messages:
+                    if hasattr(msg, "model_dump"):
+                        message_dicts.append(msg.model_dump())
+                    else:
+                        # Handle LangChain BaseMessage types
+                        msg_dict = {"role": msg.type, "content": msg.content}
+                        if hasattr(msg, "additional_kwargs"):
+                            for k, v in msg.additional_kwargs.items():
+                                msg_dict[k] = v
+                        message_dicts.append(msg_dict)
+                
+                logger.debug(f"Invoking Ollama LLM with {len(message_dicts)} fixed messages")
+                return {"messages": [await bound_llm.ainvoke(message_dicts)]}
+            else:
+                logger.debug(f"Using standard message format for LLM type: {getattr(bound_llm, '_llm_type', 'unknown')}")
+                return {"messages": [await bound_llm.ainvoke(dump_messages(messages))]}
         except Exception as e:
             logger.error(f"Error in chat node: {e}")
             raise
 
     # 7) Define tool call node
     async def tool_call(state):
-        """
-        Process the last message's tool_calls, introspect each tool's signature,
-        wrap args into Pydantic models when needed, or pass as keyword args.
-        """
+        """Process tool calls from the last message."""
         outputs = []
-        for call in state["messages"][-1].tool_calls:
+        last_message = state["messages"][-1]
+        
+        logger.debug(f"Checking for tool calls in message: {last_message}")
+        
+        if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+            logger.warning("No tool_calls found in the last message")
+            return {"messages": state["messages"]}
+            
+        logger.info(f"Processing {len(last_message.tool_calls)} tool calls")
+        
+        for call in last_message.tool_calls:
             tool_name = call["name"]
-            args      = call["args"]  # e.g. {"params": {...}}
-            tool      = tools_by_name.get(tool_name)
+            args = call["args"]
+            tool = tools_by_name.get(tool_name)
 
-            logger.info(f"[DEBUG] Calling tool '{tool_name}' with args keys: {list(args.keys())}")
+            logger.info(f"Calling tool '{tool_name}' with args: {args}")
 
-            # Special case: If args has a 'params' key, parse it if it's a string
-            if "params" in args and isinstance(args["params"], str):
-                raw_params = args["params"]
-                logger.info("[DEBUG] Found 'params' key with string value, attempting to parse")
-                try:
-                    # First try JSON parsing
-                    args["params"] = json.loads(raw_params)
-                    logger.info("[DEBUG] Parsed JSON string to dict")
-                except json.JSONDecodeError:
-                    try:
-                        # If JSON fails, try Python literal_eval for Python dict-like strings
-                        args["params"] = ast.literal_eval(raw_params)
-                        logger.info("[DEBUG] Parsed Python dict-like string using ast.literal_eval")
-                    except (SyntaxError, ValueError):
-                        logger.error(f"[DEBUG] Failed to parse params string: {raw_params}")
-                        # Keep as string - will likely fail but not our fault
-
-            # Special case for get_league_leaders_info: adjust field names if needed
-            if tool_name == "get_league_leaders_info" and "params" in args and isinstance(args["params"], dict):
-                params = args["params"]
-                # Map LLM generated fields to expected field names
-                field_mapping = {
-                    "stat": "stat_category",
-                    "mode": "per_mode",
-                    "points": "PTS",
-                    "per_game": "PerGame",
-                    "totals": "Totals",
-                    "per48": "Per48"
-                }
-                
-                # Create a new params dict with correctly mapped field names
-                fixed_params = {}
-                
-                # Handle stat_category (required)
-                if "stat_category" in params:
-                    fixed_params["stat_category"] = params["stat_category"]
-                elif "stat" in params:
-                    stat_value = params["stat"].upper() if params["stat"].lower() != "points" else "PTS"
-                    fixed_params["stat_category"] = stat_value
-                
-                # Handle per_mode (required)
-                if "per_mode" in params:
-                    fixed_params["per_mode"] = params["per_mode"]
-                elif "mode" in params:
-                    mode_value = params["mode"]
-                    if mode_value.lower() == "per_game":
-                        fixed_params["per_mode"] = "PerGame"
-                    elif mode_value.lower() == "totals":
-                        fixed_params["per_mode"] = "Totals"
-                    elif mode_value.lower() == "per48":
-                        fixed_params["per_mode"] = "Per48"
-                
-                # Handle season (optional)
-                if "season" in params:
-                    season_value = params["season"]
-                    if season_value.lower() == "last" or season_value.lower() == "latest":
-                        # Current NBA season is 2024-25
-                        fixed_params["season"] = "2024-25"
-                    else:
-                        fixed_params["season"] = season_value
-                
-                logger.info(f"[DEBUG] Mapped params from {params} to {fixed_params}")
-                args["params"] = fixed_params
-
-            # Inspect the run() signature
-            sig = inspect.signature(tool.run)
-            # Skip the 'self' parameter
-            param_items = list(sig.parameters.items())[1:]
-            logger.info(f"[DEBUG] tool.run signature parameters: {[n for n,_ in param_items]}")
-
-            # If exactly one parameter: either a Pydantic model or a JSON payload
-            if len(param_items) == 1:
-                name, param = param_items[0]
-                ann = param.annotation
-
-                # 1) Pydantic-model branch
-                if inspect.isclass(ann) and issubclass(ann, BaseModel):
-                    logger.info(f"[DEBUG] Wrapping args into Pydantic model {ann.__name__}")
-                    # The LLM payload often nests all fields under "params"
-                    payload = args.get(name, args)
-                    if isinstance(payload, dict):
-                        model = ann(**payload)
-                    else:
-                        # If it's a JSON string, let Pydantic parse it
-                        model = ann.parse_raw(payload)
-                    result = await tool.run(model)
-
-                # 2) Single-arg MCP tool: For tools expecting 'params' object, pass that directly
-                elif name == "context" and "params" in args:
-                    logger.info("[DEBUG] Single-arg MCP tool with 'context' parameter, wrapping params in dict")
-                    # Wrap params in a dict with 'params' key to match expected model structure
-                    result = await tool.run({"params": args["params"]})
-                # 3) Other single-arg tool
-                else:
-                    logger.info("[DEBUG] Single-arg MCP tool, passing full args dict")
-                    result = await tool.run(args)
-
-            # Multi-arg: expand as keywords
+            if tool is None:
+                logger.error(f"Tool '{tool_name}' not found")
+                tool_result = f"Error: Tool '{tool_name}' not found"
             else:
-                logger.info("[DEBUG] Multi-arg tool, calling run(**args)")
-                result = await tool.run(**args)
+                try:
+                    # Special handling for get_league_leaders_info
+                    if tool_name == "get_league_leaders_info":
+                        from app.services.mcp.nba_mcp.nba_server import LeagueLeadersParams
+                        logger.debug(f"Special handling for get_league_leaders_info with args: {args}")
+                        try:
+                            # Create a LeagueLeadersParams instance
+                            params = LeagueLeadersParams(**args)
+                            logger.debug(f"Created LeagueLeadersParams: {params}")
+                            # Pass the params object to the tool
+                            tool_result = await _invoke_tool_async(tool, {"params": params})
+                        except Exception as e:
+                            logger.error(f"Error with LeagueLeadersParams: {e}")
+                            tool_result = f"Error with parameters for '{tool_name}': {str(e)}"
+                    else:
+                        logger.debug(f"Invoking {tool_name} with arguments: {args!r}")
+                        tool_result = await _invoke_tool_async(tool, args)
+                        logger.debug(f"{tool_name} returned: {tool_result!r}")
+                except Exception as e:
+                    logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
+                    tool_result = f"Error executing tool '{tool_name}': {str(e)}"
 
             outputs.append(
-                ToolMessage(content=result, name=tool_name, tool_call_id=call["id"])
+                ToolMessage(content=tool_result, name=tool_name, tool_call_id=call["id"])
             )
 
-        # Preserve entire conversation history so the next chat node has full context
         return {"messages": state["messages"] + outputs}
 
 
@@ -292,14 +318,54 @@ class LangGraphAgent:
 
     def __init__(self):
         """Initialize the LangGraph Agent with necessary components."""
-        # Use the modular LLM provider
-        self.llm = get_llm().bind_tools(tools)
-        self.tools_by_name = {tool.name: tool for tool in tools}
+        # Initialize attributes
         self._connection_pool: Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
         self._mcp_tools = None
+        
+        # Immediately load MCP tools
+        asyncio.create_task(self._load_mcp_tools())
+        
+        # Use the modular LLM provider but don't bind tools yet until MCP tools are loaded
+        self.llm = get_llm()
+        self.tools_by_name = {tool.name: tool for tool in tools}
 
         logger.info("llm_initialized", model=settings.model_name, environment=settings.app_env)
+
+    async def _load_mcp_tools(self):
+        """Load MCP tools asynchronously."""
+        try:
+            # Fetch and normalize MCP tools
+            raw_mcp = await get_mcp_tools()
+            mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+            self._mcp_tools = {t.name: t for t in mcp_tools}
+            
+            # Extract schemas for binding to LLM
+            mcp_fn_defs = []
+            for t in mcp_tools:
+                schema = getattr(t, "parameters", {})
+                mcp_fn_defs.append({
+                    "name": t.name,
+                    "description": getattr(t, "description", "") or "",
+                    "parameters": {
+                        "title": t.name,
+                        "description": getattr(t, "description", "") or "",
+                        "type": "object",
+                        **schema
+                    }
+                })
+            
+            # Combine built-in tools with MCP tools and bind to LLM
+            fn_defs = tools + mcp_fn_defs
+            self.llm = get_llm().bind_tools(fn_defs)
+            
+            # Update tools_by_name with MCP tools
+            self.tools_by_name.update(self._mcp_tools)
+            
+            logger.info(f"MCP tools loaded and bound to LLM: {len(self._mcp_tools)} tools")
+        except Exception as e:
+            logger.error(f"Failed to load MCP tools: {e}")
+            # Don't raise - we'll try again on demand
 
     def _get_model_kwargs(self) -> Dict[str, Any]:
         """Get environment-specific model kwargs.
@@ -322,18 +388,41 @@ class LangGraphAgent:
         return model_kwargs
 
     async def _get_connection_pool(self) -> AsyncConnectionPool:
-        """Get a PostgreSQL connection pool using environment-specific settings.
-
-        Returns:
-            AsyncConnectionPool: A connection pool for PostgreSQL database.
-        """
+        """Get a PostgreSQL connection pool using environment‐specific settings."""
         if self._connection_pool is None:
-            try:
-                # Configure pool size based on environment
-                max_size = settings.POSTGRES_POOL_SIZE
 
+            # 1) Parse the URL
+            raw_url = settings.POSTGRES_URL
+            logger.debug(f"Raw POSTGRES_URL = {raw_url}")
+            parsed = urlparse(raw_url)
+            host, port = parsed.hostname, parsed.port
+            logger.debug(f"Parsed DB host={host!r}, port={port!r}")
+
+            # 2) Try DNS resolution, fallback if host == "db"
+            try:
+                socket.getaddrinfo(host, port)
+                logger.debug("DNS resolution succeeded for host={!r}".format(host))
+                db_url = raw_url
+            except socket.gaierror as dns_err:
+                logger.error(f"DNS resolution failed for host={host!r}: {dns_err}")
+                if host == "db":
+                    logger.info("Falling back to localhost for database host")
+                    user = parsed.username or ""
+                    pwd  = parsed.password or ""
+                    creds = f"{user}:{pwd}@" if user and pwd else ""
+                    new_netloc = f"{creds}localhost:{port}"
+                    fixed = parsed._replace(netloc=new_netloc)
+                    db_url = urlunparse(fixed)
+                    logger.debug(f"Using fallback DB URL: {db_url}")
+                else:
+                    # If it's some other host, re-raise
+                    raise
+
+            # 3) Build and open the async pool
+            try:
+                max_size = settings.POSTGRES_POOL_SIZE
                 self._connection_pool = AsyncConnectionPool(
-                    settings.POSTGRES_URL,
+                    db_url,
                     open=False,
                     max_size=max_size,
                     kwargs={
@@ -343,35 +432,79 @@ class LangGraphAgent:
                     },
                 )
                 await self._connection_pool.open()
-                logger.info("connection_pool_created", max_size=max_size, environment=settings.app_env)
+                logger.info(
+                    "connection_pool_created",
+                    max_size=settings.POSTGRES_POOL_SIZE,
+                    environment=settings.app_env,
+                )
             except Exception as e:
-                logger.error("connection_pool_creation_failed", error=str(e), environment=settings.app_env)
-                # In production, we might want to degrade gracefully
+                logger.error(
+                    "connection_pool_creation_failed",
+                    error=str(e),
+                    environment=settings.app_env,
+                )
                 if settings.app_env == Environment.PRODUCTION.value:
-                    logger.warning("continuing_without_connection_pool", environment=settings.app_env)
+                    logger.warning(
+                        "continuing_without_connection_pool",
+                        environment=settings.app_env,
+                    )
                     return None
-                raise e
+                # In dev, surface the exception so you see what's wrong
+                raise
+
         return self._connection_pool
 
+
     async def _chat(self, state: GraphState) -> dict:
-        """Process the chat state and generate a response.
+        """Process user messages and generate LLM responses.
 
         Args:
-            state (GraphState): The current state of the conversation.
+            state: The agent state including messages history
 
         Returns:
-            dict: Updated state with new messages.
+            Updated state with LLM response
+
+        Raises:
+            Exception: If the LLM fails to generate a response after max retries
         """
+        logger.debug(f"Chat node entered with state: {state.model_dump()}")
+        
+        # Get the messages from the state
         messages = prepare_messages(state.messages, self.llm, SYSTEM_PROMPT)
-
+        logger.debug(f"Prepared messages for LLM")
+        
+        # Call the LLM to generate a response
         llm_calls_num = 0
-
-        # Configure retry attempts based on environment
         max_retries = settings.max_llm_call_retries
 
         for attempt in range(max_retries):
             try:
-                generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
+                # Apply Ollama-specific fixes if using Ollama
+                if (hasattr(self.llm, "_llm_type") and "ollama" in self.llm._llm_type.lower()) or \
+                   settings.llm_provider.lower() == "ollama":
+                    logger.debug(f"Detected Ollama LLM, applying message fixes for attempt {attempt+1}")
+                    fixed_messages = fix_messages_for_ollama(messages)
+                    
+                    # Dump messages to dict format for LLM
+                    message_dicts = []
+                    for msg in fixed_messages:
+                        if hasattr(msg, "model_dump"):
+                            message_dicts.append(msg.model_dump())
+                        else:
+                            # Handle LangChain BaseMessage types
+                            msg_dict = {"role": msg.type, "content": msg.content}
+                            if hasattr(msg, "additional_kwargs"):
+                                for k, v in msg.additional_kwargs.items():
+                                    msg_dict[k] = v
+                            message_dicts.append(msg_dict)
+                    
+                    logger.debug(f"Invoking Ollama LLM with {len(message_dicts)} fixed messages")
+                    logger.debug(f"Message samples: {message_dicts[0]}")
+                    generated_state = {"messages": [await self.llm.ainvoke(message_dicts)]}
+                else:
+                    logger.debug(f"Using standard message format for LLM type: {getattr(self.llm, '_llm_type', 'unknown')}")
+                    generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
+                    
                 logger.info(
                     "llm_response_generated",
                     session_id=state.session_id,
@@ -380,7 +513,18 @@ class LangGraphAgent:
                     environment=settings.app_env,
                 )
                 return generated_state
-            except OpenAIError as e:
+            except Exception as e:
+                # Check for authentication errors (401)
+                if hasattr(e, "status_code") and e.status_code == 401:
+                    logger.error(
+                        "authentication_failed",
+                        error=str(e),
+                        provider=settings.llm_provider,
+                        model=settings.model_name,
+                        environment=settings.app_env,
+                    )
+                    raise RuntimeError(f"LLM authentication failed (401). Check your API key for {settings.llm_provider}.") from e
+                
                 logger.error(
                     "llm_call_failed",
                     llm_calls_num=llm_calls_num,
@@ -389,6 +533,10 @@ class LangGraphAgent:
                     error=str(e),
                     environment=settings.app_env,
                 )
+                # Log more detailed error info
+                logger.debug(f"Error type: {type(e).__name__}")
+                logger.debug(f"Error details: {e}")
+                
                 llm_calls_num += 1
 
                 # In production, we might want to fall back to a more reliable model
@@ -402,7 +550,7 @@ class LangGraphAgent:
                         # Re-initialize the LLM with the fallback model
                         temp_settings = settings.model_copy(update={"model_name": fallback_model})
                         with settings._set_temporary(temp_settings):
-                            self.llm = get_llm().bind_tools(tools)
+                            self.llm = get_llm()
 
                 continue
 
@@ -419,35 +567,76 @@ class LangGraphAgent:
             Dict with updated messages containing tool responses.
         """
         outputs = []
+        logger.debug(f"Processing tool calls from last message. Message content: {state.messages[-1].content}")
+        
+        # Check if we have any tool calls
+        if not hasattr(state.messages[-1], 'tool_calls') or not state.messages[-1].tool_calls:
+            logger.warning("No tool_calls attribute found in the last message or it's empty")
+            # Return unchanged state if no tool calls
+            return {"messages": state.messages}
+        
+        logger.debug(f"Found {len(state.messages[-1].tool_calls)} tool calls to process")
+        
         for tool_call in state.messages[-1].tool_calls:
             tool_name = tool_call["name"]
             args = tool_call["args"]
+            logger.debug(f"Processing tool call: {tool_name} with args: {args}")
             
+            # Check if mcp_tools is initialized
+            if self._mcp_tools is None:
+                logger.warning("MCP tools are not initialized. Initializing now...")
+                # Lazy-load MCP tools if not already loaded
+                raw_mcp = await get_mcp_tools()
+                mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+                self._mcp_tools = {t.name: t for t in mcp_tools}
+                logger.info(f"Loaded {len(self._mcp_tools)} MCP tools")
+            
+            # Find the tool
             if tool_name in self.tools_by_name:
                 tool = self.tools_by_name[tool_name]
+                logger.debug(f"Found tool '{tool_name}' in built-in tools")
             elif self._mcp_tools and tool_name in self._mcp_tools:
                 tool = self._mcp_tools[tool_name]
+                logger.debug(f"Found tool '{tool_name}' in MCP tools")
             else:
                 tool = None
-                
+                logger.error(f"Tool not found: {tool_name}")
+                logger.debug(f"Available tools: {list(self.tools_by_name.keys())}")
+                if self._mcp_tools:
+                    logger.debug(f"Available MCP tools: {list(self._mcp_tools.keys())}")
+            
             if tool is None:
                 tool_result = f"Error: Tool '{tool_name}' not found"
-                logger.error(f"Tool not found: {tool_name}")
             else:
                 try:
-                    # Handle different tool invocation patterns
-                    if hasattr(tool, "ainvoke"):
-                        tool_result = await tool.ainvoke(args)
-                    elif hasattr(tool, "arun"):
-                        tool_result = await tool.arun(**args)
-                    elif hasattr(tool, "run_async"):
-                        tool_result = await tool.run_async(args)
+                    # Special handling for tools that need structured input
+                    if tool_name == "get_league_leaders_info":
+                        logger.debug(f"Special handling for get_league_leaders_info with args: {args}")
+                        # Check if args already has a params key
+                        if "params" in args:
+                            logger.debug("Args already has params key")
+                            tool_result = await _invoke_tool_async(tool, args)
+                        else:
+                            # We need to wrap the args in a params object
+                            logger.debug(f"Wrapping args in params object: {args}")
+                            from app.services.mcp.nba_mcp.nba_server import LeagueLeadersParams
+                            try:
+                                # Create a LeagueLeadersParams instance
+                                params = LeagueLeadersParams(**args)
+                                logger.debug(f"Created params: {params}")
+                                # Pass the params object to the tool
+                                tool_result = await _invoke_tool_async(tool, {"params": params})
+                            except Exception as e:
+                                logger.error(f"Error creating LeagueLeadersParams: {e}")
+                                tool_result = f"Error with parameters for '{tool_name}': {str(e)}"
                     else:
-                        # Fallback to synchronous run
-                        tool_result = tool.run(**args)
+                        logger.debug(f"Standard invocation for {tool_name} with args: {args}")
+                        tool_result = await _invoke_tool_async(tool, args)
+                    
+                    logger.info(f"Tool '{tool_name}' execution successful")
                 except Exception as e:
+                    logger.error(f"Tool execution error: {e}", exc_info=True)
                     tool_result = f"Error executing tool '{tool_name}': {str(e)}"
-                    logger.error(f"Tool execution error: {e}")
                 
             outputs.append(
                 ToolMessage(
@@ -456,7 +645,9 @@ class LangGraphAgent:
                     tool_call_id=tool_call["id"],
                 )
             )
-        return {"messages": outputs}
+        
+        logger.debug(f"Tool calls processed, returning {len(outputs)} tool responses")
+        return {"messages": state.messages + outputs}
 
     def _should_continue(self, state: GraphState) -> Literal["end", "continue"]:
         """Determine if the agent should continue or end based on the last message.
@@ -528,16 +719,8 @@ class LangGraphAgent:
                         logger.error(f"Tool not found: {tool_name}")
                     else:
                         try:
-                            # Handle different tool invocation patterns
-                            if hasattr(tool, "ainvoke"):
-                                tool_result = await tool.ainvoke(args)
-                            elif hasattr(tool, "arun"):
-                                tool_result = await tool.arun(**args)
-                            elif hasattr(tool, "run_async"):
-                                tool_result = await tool.run_async(args)
-                            else:
-                                # Fallback to synchronous run
-                                tool_result = tool.run(**args)
+                            # Use the helper function to invoke the tool
+                            tool_result = await _invoke_tool_async(tool, args)
                         except Exception as e:
                             tool_result = f"Error executing tool '{tool_name}': {str(e)}"
                             logger.error(f"Tool execution error: {e}")
@@ -612,8 +795,15 @@ class LangGraphAgent:
             ],
         }
         try:
+            # Process messages based on LLM provider
+            message_dicts = dump_messages(messages)
+            if settings.llm_provider.lower() == "ollama":
+                # Apply Ollama-specific fixes
+                fixed_lc_messages = fix_messages_for_ollama(messages)
+                message_dicts = dump_messages(fixed_lc_messages)
+                
             response = await self._graph.ainvoke(
-                {"messages": dump_messages(messages), "session_id": session_id}, config
+                {"messages": message_dicts, "session_id": session_id}, config
             )
             return self.__process_messages(response["messages"])
         except Exception as e:
@@ -641,12 +831,51 @@ class LangGraphAgent:
                 )
             ],
         }
+        
+        # Ensure MCP tools are loaded
+        if self._mcp_tools is None:
+            logger.info("MCP tools not loaded yet, loading now...")
+            # Fetch and normalize MCP tools
+            raw_mcp = await get_mcp_tools()
+            mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+            self._mcp_tools = {t.name: t for t in mcp_tools}
+            
+            # Update tools_by_name with MCP tools
+            self.tools_by_name.update(self._mcp_tools)
+            logger.info(f"Loaded {len(self._mcp_tools)} MCP tools")
+            
+            # Extract schemas for binding to LLM
+            mcp_fn_defs = []
+            for t in mcp_tools:
+                schema = getattr(t, "parameters", {}) or {}
+                mcp_fn_defs.append({
+                    "name": t.name,
+                    "description": getattr(t, "description", "") or "",
+                    "parameters": schema if t.name == "get_league_leaders_info" else {
+                        "type": "object",
+                        **schema
+                    }
+                })
+            
+            # Combine built-in tools with MCP tools and bind to LLM
+            fn_defs = tools + mcp_fn_defs
+            self.llm = get_llm().bind_tools(fn_defs)
+            logger.info("Tools bound to LLM")
+        
         if self._graph is None:
             self._graph = await self.create_graph()
 
         try:
+            # Process messages based on LLM provider
+            message_dicts = dump_messages(messages)
+            if settings.llm_provider.lower() == "ollama":
+                # Apply Ollama-specific fixes
+                fixed_lc_messages = fix_messages_for_ollama(messages)
+                message_dicts = dump_messages(fixed_lc_messages)
+                
+            logger.debug(f"Starting stream with {len(message_dicts)} messages")
             async for token, _ in self._graph.astream(
-                {"messages": dump_messages(messages), "session_id": session_id}, config, stream_mode="messages"
+                {"messages": message_dicts, "session_id": session_id}, config, stream_mode="messages"
             ):
                 try:
                     yield token.content

@@ -437,67 +437,73 @@ async def get_league_leaders_info(params: LeagueLeadersParams) -> str:
 
 
 
+
+import logging
+import time
+from datetime import datetime
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+def _today_str() -> str:
+    """Helper to return today's date in YYYY-MM-DD format."""
+    return datetime.now().strftime("%Y-%m-%d")
+
 @mcp_server.tool()
 async def get_live_scores(target_date: Optional[str] = None) -> str:
     """
     Provides live or historical NBA scores for a specified date.
-
-    Parameters:
-        target_date (Optional[str]): Date string 'YYYY-MM-DD'; uses today if None.
-
-    Returns:
-        str: Formatted game summaries like 'Lakers vs Suns – 102-99 (Final)'.
+    If no date is provided, defaults to today.
     """
     client = NBAApiClient()
-    # Normalize date or default to today
-    if not target_date:
-        target_date = datetime.now().strftime("%Y-%m-%d")
+    # 1) Determine the date
+    target_date = target_date or _today_str()
 
     try:
+        # 2) Fetch data and time the call
+        start = time.perf_counter()
         result = await client.get_live_scoreboard(
             target_date=target_date,
             as_dataframe=False
         )
-        # result is either a list of dicts or an error string
-        if isinstance(result, str):
-            return result
+        duration = time.perf_counter() - start
+        logger.debug(f"get_live_scoreboard({target_date}) took {duration:.3f}s")
 
-        games = result  # list of game dicts
+        # 3) Bail early on error-string results
+        if isinstance(result, str):
+            return f"[Error] NBA API: {result}"
+
+        games = result  # guaranteed list of dicts
         if not games:
             return f"No games found for {target_date}."
 
-        # Format each into "Lakers vs Suns – 102-99 (Final)"
+        # 4) Format each game
         lines = []
         for g in games:
-            summary = g.get("scoreBoardSummary") or g.get("scoreBoardSnapshot")
-            home = summary["homeTeam"]
-            away = summary["awayTeam"]
+            summary = g.get("scoreBoardSummary") or g.get("scoreBoardSnapshot", {})
+            home = summary.get("homeTeam", {})
+            away = summary.get("awayTeam", {})
 
-            # Real‑time if the live‑API gave us `teamName`+`score`
+            # Real-time vs historical
             if "teamName" in home:
-                home_team = home["teamName"]
-                away_team = away["teamName"]
-                home_pts  = home["score"]
-                away_pts  = away["score"]
+                h_name, a_name = home["teamName"], away["teamName"]
+                h_pts, a_pts   = home["score"], away["score"]
             else:
-                # Historical if we got uppercase keys from Stats API
-                home_team = home.get("TEAM_ABBREVIATION") or get_team_name(home["TEAM_ID"])
-                away_team = away.get("TEAM_ABBREVIATION") or get_team_name(away["TEAM_ID"])
-                home_pts  = home.get("PTS")
-                away_pts  = away.get("PTS")
+                h_name = home.get("TEAM_ABBREVIATION") or get_team_name(home["TEAM_ID"])
+                a_name = away.get("TEAM_ABBREVIATION") or get_team_name(away["TEAM_ID"])
+                h_pts   = home.get("PTS")
+                a_pts   = away.get("PTS")
 
             status = summary.get("gameStatusText", "")
-            lines.append(f"{home_team} vs {away_team} – {home_pts}-{away_pts} ({status})")
+            lines.append(f"{h_name} vs {a_name} – {h_pts}-{a_pts} ({status})")
 
+        # 5) Return header + body
         header = f"NBA Games for {target_date}:\n"
         return header + "\n".join(lines)
 
     except Exception as e:
-        # Log full traceback via the logger (MCP will strip this out),
-        # and return the concise error message to the caller.
         logger.exception("Unexpected error in get_live_scores")
-        return f"Unexpected error in get_live_scores: {e}"
-
+        return f"[Error] get_live_scores crashed: {e}"
 
 
 
