@@ -1,12 +1,14 @@
 """This file contains the main application entry point.
 
-location: app\main.py
+location: app/main.py
 
 """
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pprint import pformat
 from typing import (
     Any,
     Dict,
@@ -20,12 +22,13 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import (
+    JSONResponse,
+    Response,
+)
 from langfuse import Langfuse
-from prometheus_client import make_asgi_app
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.v1.api import api_router
 from app.core.config import settings
@@ -34,6 +37,8 @@ from app.core.logging import logger
 from app.core.metrics import setup_metrics
 from app.core.middleware import MetricsMiddleware
 from app.services.database import database_service
+
+# Import the mcp_server early so it's available in the lifespan
 from app.services.mcp.nba_mcp.nba_server import mcp_server
 
 # Load environment variables
@@ -49,27 +54,39 @@ langfuse = Langfuse(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handle application startup and shutdown events."""
+    logger.info("application_startup",
+                project_name=settings.PROJECT_NAME,
+                version=settings.VERSION,
+                api_prefix=settings.API_V1_STR)
+
+    # Import MCP server resources and tools
+    logger.info("Importing MCP server resources and tools")
+    await mcp_server.import_server(prefix="mcp-sse", server=mcp_server)
+
+    # Verify MCP server is properly configured
+    resources = await mcp_server.get_resources()
+    tools = await mcp_server.get_tools()
+    
+    # Log detailed information about MCP setup
     logger.info(
-        "application_startup",
-        project_name=settings.PROJECT_NAME,
-        version=settings.VERSION,
-        api_prefix=settings.API_V1_STR,
+        "MCP server configuration", 
+        resource_count=len(resources),
+        tool_count=len(tools),
+        mcp_base_port=os.getenv("NBA_MCP_PORT", "8000"),
+        has_sse_app=hasattr(mcp_server, 'sse_app'),
     )
     
-    # Debug mount points and routes
-    logger.info("Dumping all registered routes for debugging:")
-    for route in app.routes:
-        methods = getattr(route, "methods", None)
-        path = getattr(route, "path", str(route))
-        logger.info(f"ROUTE: {path} - {methods}")
+    logger.debug("Registered resource patterns: %r", resources)
+    logger.debug("Registered tool names:        %r", tools)
     
-    # Verify SSE mount points
-    logger.info("MCP Server Settings:")
-    logger.info(f"message_path: {mcp_server.settings.message_path}")
-    logger.info(f"sse_path: {mcp_server.settings.sse_path}")
-    logger.info(f"host: {mcp_server.settings.host}")
-    logger.info(f"port: {mcp_server.settings.port}")
+    # Verify router mounts
+    from app.api.v1.api import api_router
+    mount_paths = [route.path for route in api_router.routes if getattr(route, 'path', None)]
+    logger.info(
+        "API router mounts", 
+        paths=mount_paths,
+        mcp_sse_mount="/mcp-sse" in mount_paths,
+    )
     
     yield
     logger.info("application_shutdown")
@@ -83,39 +100,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Debug OpenAPI configuration - especially for authentication
-@app.on_event("startup")
-async def debug_openapi_config():
-    """Log OpenAPI configuration for debugging."""
-    logger.info("OpenAPI security schemes:")
-    openapi_schema = app.openapi()
-    if "components" in openapi_schema and "securitySchemes" in openapi_schema["components"]:
-        logger.info(f"Security schemes defined: {list(openapi_schema['components']['securitySchemes'].keys())}")
-    else:
-        logger.warning("No security schemes defined in OpenAPI schema")
-    
-    # Check for global security requirement
-    if "security" in openapi_schema:
-        logger.info(f"Global security requirements: {openapi_schema['security']}")
-    else:
-        logger.warning("No global security requirements in OpenAPI schema")
-
-# Mount the MCP SSE app at a dedicated path for clarity and to avoid conflicts
-# First create the SSE app with the correct configuration
-mcp_sse_app = mcp_server.sse_app()
-
-# Extract relevant paths from the server settings
-sse_path = mcp_server.settings.sse_path.strip('/')
-message_path = mcp_server.settings.message_path.strip('/')
-
-# Log the changes in configuration - SSE now runs on its own port
-logger.info("MCP SSE endpoints are now configured to run on a separate port")
-logger.info(f"  Main API: port {os.getenv('NBA_MCP_PORT', '8000')}")
-logger.info(f"  SSE Server: port {os.getenv('NBA_MCP_SSE_PORT', '8001')}")
-logger.info(f"  Run with: python run_sse.py --mode local")
-
-# Note: No longer mounting SSE endpoints in the main FastAPI app
-# The SSE server runs on its own port NBA_MCP_SSE_PORT (default 8001)
+# Note: The main API router includes both handlers for MCP:
+# 1. A regular router with explicit handlers at /api/v1/mcp/messages/{path} 
+# 2. A direct mount for the SSE app at /api/v1/mcp-sse
+# This separation prevents path conflicts
 
 # Set up Prometheus metrics
 setup_metrics(app)
@@ -125,7 +113,7 @@ app.add_middleware(MetricsMiddleware)
 
 # Set up rate limiter exception handler
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, lambda req, exc: _rate_limit_exceeded_handler(req, exc))
 
 
 # Add validation exception handler
@@ -212,4 +200,4 @@ async def health_check(request: Request) -> Dict[str, Any]:
     # If DB is unhealthy, set the appropriate status code
     status_code = status.HTTP_200_OK if db_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
 
-    return JSONResponse(content=response, status_code=status_code)
+    return response if db_healthy else JSONResponse(content=response, status_code=status_code)

@@ -17,7 +17,7 @@ USE_PTY = os.name != "nt"
 @task(help={"env": "development|staging|production"})
 def dev(c, env="development"):
     """
-    Start the API in development mode (uvicorn reload), *embedded* MCP SSE.
+    Start the API in development mode (uvicorn reload), with MCP mounted at /mcp on the same port.
     Usage: inv dev --env=development
     """
     _load_env(env)
@@ -33,16 +33,18 @@ def dev(c, env="development"):
         c.run("uv pip install -e \".[dev,examples]\"", pty=USE_PTY)
         cmd = "uv run uvicorn app.main:app --reload --port 8000"
     
+    # Run FastAPI with embedded MCP - serves both REST API and SSE stream at /mcp on port 8000
     c.run(cmd, pty=USE_PTY, env={"APP_ENV": env, "MCP_RUN_MODE": "embedded"})
 
 @task(help={"env": "development|staging|production"})
 def prod(c, env="production"):
     """
-    Start the API in production mode.
+    Start the API in production mode, with MCP mounted at /mcp on the same port.
     Usage: inv prod --env=production
     """
     _load_env(env)
     cmd = "./.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # Single-port setup - serves both REST API and SSE stream at /mcp on port 8000
     c.run(cmd, pty=USE_PTY, env={"APP_ENV": env, "MCP_RUN_MODE": "embedded"})
 
 @task(help={"env": "development|staging|production"})

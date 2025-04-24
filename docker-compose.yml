@@ -31,7 +31,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"   # serves both REST and MCP SSE at /messages
+      - "8000:8000"   # serves both REST API and MCP SSE at /mcp
     volumes:
       - ./app:/app/app
       - ./logs:/app/logs

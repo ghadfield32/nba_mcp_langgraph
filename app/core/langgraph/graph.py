@@ -1,4 +1,7 @@
-"""This file contains the LangGraph Agent/workflow and interactions with the LLM."""
+"""This file contains the LangGraph Agent/workflow and interactions with the LLM.
+
+location: app\core\langgraph\graph.py
+"""
 
 from typing import (
     Any,

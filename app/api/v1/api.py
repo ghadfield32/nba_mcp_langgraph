@@ -1,35 +1,47 @@
 """API v1 router configuration.
-
-This module sets up the main API router and includes all sub-routers for different
-endpoints like authentication and chatbot functionality.
+location: app/api/v1/api.py
+This module sets up the main API router and includes all sub-routers.
+It also mounts the MCP SSE ASGI app for streaming endpoints.
 """
 
 from fastapi import APIRouter
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.chatbot import router as chatbot_router
+from app.api.v1.mcp_router import router as mcp_router
 from app.core.logging import logger
+from app.services.mcp.nba_mcp.nba_server import mcp_server  # <<-- import your SSE app
 
 api_router = APIRouter()
 
-from app.services.mcp.nba_mcp.nba_server import router as mcp_nba_router
-
-api_router.include_router(mcp_nba_router)
-
-# Include routers
+# Include your existing REST routers
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(chatbot_router, prefix="/chatbot", tags=["chatbot"])
+api_router.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 
+# Use API router's mount method to add the MCP SSE app 
+# IMPORTANT: The ASGI app expects paths like /messages/{resource}, 
+# so we mount at /mcp-sse to allow access via /api/v1/mcp-sse/messages/{resource}
+api_router.mount("/mcp-sse", mcp_server.sse_app(), name="mcp_sse")
+
+# Add convenience redirect/instruction for the correct usage
+@api_router.get("/mcp-sse")
+async def mcp_sse_help():
+    """Help endpoint for MCP SSE usage."""
+    logger.info("mcp_sse_help_called")
+    return {
+        "message": "MCP SSE server is mounted here",
+        "usage": "To access resources, use the path /api/v1/mcp-sse/messages/{resource_path}",
+        "example": "/api/v1/mcp-sse/messages/api-docs://openapi.json?session_id=your_session_id",
+        "note": "Most MCP resources require a session_id query parameter"
+    }
 
 @api_router.get("/health")
 async def health_check():
-    """Health check endpoint.
-
-    Returns:
-        dict: Health status information.
-    """
+    """Health check endpoint."""
     logger.info("health_check_called")
     return {"status": "healthy", "version": "1.0.0"}
+
 
 
 @api_router.get("/usage-guide")

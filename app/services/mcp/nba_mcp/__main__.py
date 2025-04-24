@@ -1,4 +1,4 @@
-# app\services\mcp\nba_mcp\__main__.py
+# nba_mcp/__main__.py
 import logging
 import os
 import sys
