@@ -186,7 +186,6 @@ This will start:
 - **FastAPI Root**: http://localhost:8000/
 - **Prometheus**: http://localhost:9090/targets (scrapes `/metrics`)
 - **Grafana**: http://localhost:3000 (admin/admin)
-- **Raw Metrics**: http://localhost:8000/metrics
 
 ### Grafana Dashboards
 

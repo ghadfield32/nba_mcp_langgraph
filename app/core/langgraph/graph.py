@@ -347,24 +347,23 @@ class LangGraphAgent:
         return self._connection_pool
 
     async def _chat(self, state: GraphState) -> dict:
-        """Process the chat state and generate a response.
-
-        Args:
-            state (GraphState): The current state of the conversation.
-
-        Returns:
-            dict: Updated state with new messages.
-        """
+        """Process the chat state and generate a response."""
         messages = prepare_messages(state.messages, self.llm, SYSTEM_PROMPT)
-
         llm_calls_num = 0
-
-        # Configure retry attempts based on environment
         max_retries = settings.max_llm_call_retries
 
         for attempt in range(max_retries):
             try:
-                generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
+                raw = await self.llm.ainvoke(dump_messages(messages))
+                # DEBUG: inspect the returned object
+                logger.debug("Raw LLM response: %r | attrs: %s", raw, dir(raw))
+
+                # Extract the true content
+                content = getattr(raw, "text", None) or getattr(raw, "content", "")
+                # Wrap in AIMessage so .content is correctly set
+                from langchain_core.messages import AIMessage
+                ai_msg = AIMessage(content=content, **getattr(raw, "additional_kwargs", {}))
+
                 logger.info(
                     "llm_response_generated",
                     session_id=state.session_id,
@@ -372,7 +371,8 @@ class LangGraphAgent:
                     model=settings.model_name,
                     environment=settings.app_env,
                 )
-                return generated_state
+                return {"messages": [ai_msg]}
+
             except OpenAIError as e:
                 logger.error(
                     "llm_call_failed",
