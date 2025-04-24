@@ -3,6 +3,7 @@
 location: app\core\langgraph\graph.py
 """
 
+import inspect
 from typing import (
     Any,
     AsyncGenerator,
@@ -27,6 +28,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import StateSnapshot
 from openai import OpenAIError
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel
 
 from app.core.config import (
     Environment,
@@ -74,11 +76,40 @@ async def configure_graph():
     mcp_fn_defs = []
     for t in mcp_tools:
         schema = getattr(t, "parameters", {})  # should be a dict with 'properties' & 'required'
+        
+        # Debug: Log the original tool schema
+        tool_name = getattr(t, "name", "unknown")
+        logger.info(f"Processing tool schema for: {tool_name}")
+        logger.info(f"Original schema: {schema}")
+        
+        # Special handling for get_league_leaders_info tool
+        if tool_name == "get_league_leaders_info":
+            logger.info("Applying special schema fix for get_league_leaders_info")
+            # Check if params is in the properties
+            if "params" in schema.get("properties", {}):
+                # This is correct, use as is
+                logger.info("Schema already has 'params' property, keeping as is")
+            else:
+                # Need to restructure schema to expect a "params" object
+                # that contains all the parameters for LeagueLeadersParams
+                logger.info("Restructuring schema to use 'params' wrapper")
+                schema = {
+                    "properties": {
+                        "params": {
+                            "type": "object",
+                            "properties": schema.get("properties", {}),
+                            "required": schema.get("required", [])
+                        }
+                    },
+                    "required": ["params"]
+                }
+                logger.info(f"Updated schema: {schema}")
+        
         mcp_fn_defs.append({
-            "name": t.name,
+            "name": tool_name,
             "description": getattr(t, "description", "") or "",
             "parameters": {
-                "title": t.name,
+                "title": tool_name,
                 "description": getattr(t, "description", "") or "",
                 "type": "object",
                 **schema
@@ -105,35 +136,57 @@ async def configure_graph():
 
     # 7) Define tool call node
     async def tool_call(state):
+        """
+        Process the last message's tool_calls, introspect each tool's signature,
+        wrap args into Pydantic models when needed, or pass as keyword args.
+        """
         outputs = []
         for call in state["messages"][-1].tool_calls:
             tool_name = call["name"]
-            args = call["args"]
-            
-            if tool_name not in tools_by_name:
-                result = f"Error: Tool '{tool_name}' not found"
-                logger.error(f"Tool not found: {tool_name}")
-            else:
-                tool = tools_by_name[tool_name]
-                try:
-                    # Handle different tool invocation patterns
-                    if hasattr(tool, "ainvoke"):
-                        result = await tool.ainvoke(args)
-                    elif hasattr(tool, "arun"):
-                        result = await tool.arun(**args)
-                    elif hasattr(tool, "run_async"):
-                        result = await tool.run_async(args)
+            args      = call["args"]  # e.g. {"params": {...}}
+            tool      = tools_by_name.get(tool_name)
+
+            logger.info(f"[DEBUG] Calling tool '{tool_name}' with args keys: {list(args.keys())}")
+
+            # Inspect the run() signature
+            sig = inspect.signature(tool.run)
+            # Skip the 'self' parameter
+            param_items = list(sig.parameters.items())[1:]
+            logger.info(f"[DEBUG] tool.run signature parameters: {[n for n,_ in param_items]}")
+
+            # If exactly one parameter: either a Pydantic model or a JSON payload
+            if len(param_items) == 1:
+                name, param = param_items[0]
+                ann = param.annotation
+
+                # 1) Pydantic-model branch
+                if inspect.isclass(ann) and issubclass(ann, BaseModel):
+                    logger.info(f"[DEBUG] Wrapping args into Pydantic model {ann.__name__}")
+                    # The LLM payload often nests all fields under "params"
+                    payload = args.get(name, args)
+                    if isinstance(payload, dict):
+                        model = ann(**payload)
                     else:
-                        # Fallback to synchronous run
-                        result = tool.run(**args)
-                except Exception as e:
-                    result = f"Error executing tool '{tool_name}': {str(e)}"
-                    logger.error(f"Tool execution error: {e}")
-                    
+                        # If it's a JSON string, let Pydantic parse it
+                        model = ann.parse_raw(payload)
+                    result = await tool.run(model)
+
+                # 2) Single-arg MCP tool: hand it the entire dict
+                else:
+                    logger.info("[DEBUG] Single-arg MCP tool, passing full args dict")
+                    result = await tool.run(args)
+
+            # Multi-arg: expand as keywords
+            else:
+                logger.info("[DEBUG] Multi-arg tool, calling run(**args)")
+                result = await tool.run(**args)
+
             outputs.append(
                 ToolMessage(content=result, name=tool_name, tool_call_id=call["id"])
             )
+
         return {"messages": outputs}
+
 
     # 8) Termination logic
     def should_continue(state):

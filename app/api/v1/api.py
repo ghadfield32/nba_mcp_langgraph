@@ -44,19 +44,39 @@ async def mcp_diagnostic():
     """Diagnostic endpoint to check MCP resources and tools."""
     logger.info("mcp_diagnostic_called")
     try:
+        # 1) Fetch
         resources = await mcp_server.get_resources()
+        # DEBUG: inspect types
+        logger.debug("Diagnostic raw resources: %r", [(r, type(r)) for r in resources])
+
+        # 2) Convert to JSON-safe strings
+        serializable_resources = []
+        for r in resources:
+            if hasattr(r, "pattern"):
+                serializable_resources.append(r.pattern)
+            else:
+                serializable_resources.append(str(r))
+
+        # 3) Fetch tools, convert to names
         tools = await mcp_server.get_tools()
+        tool_names = []
+        for t in tools:
+            if isinstance(t, str):
+                tool_names.append(t)
+            else:
+                tool_names.append(getattr(t, "name", str(t)))
+
+        # 4) Return clean payload
         return {
-            "resources": resources,
-            "tools": [t.name for t in tools],
+            "resources": serializable_resources,
+            "tools": tool_names,
             "status": "healthy"
         }
+
     except Exception as e:
-        logger.error(f"Error in mcp_diagnostic: {str(e)}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        logger.error(f"Error in mcp_diagnostic: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
 
 @api_router.get("/health")
 async def health_check():

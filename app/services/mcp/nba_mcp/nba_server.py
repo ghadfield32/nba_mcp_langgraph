@@ -20,6 +20,10 @@ from typing import (
 )
 
 import pandas as pd
+from fastmcp import (
+    Context,
+    FastMCP,
+)
 from nba_api.stats.static import (
     players,
     teams,
@@ -29,11 +33,6 @@ from nba_api.stats.static import (
 from pydantic import (
     BaseModel,
     Field,
-)
-
-from fastmcp import (
-    Context,
-    FastMCP,
 )
 
 from .api.client import NBAApiClient
@@ -424,6 +423,7 @@ async def get_league_leaders_info(params: LeagueLeadersParams) -> str:
             out.append(f"{i}. {name} ({team}): {value}")
         out.append("")
     return "\n".join(out).strip()
+
 
 
 

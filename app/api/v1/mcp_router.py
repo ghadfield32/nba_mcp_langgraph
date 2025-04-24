@@ -56,3 +56,28 @@ async def play_by_play_endpoint(
         start_clock, recent_n, max_lines
     )
     return {"result": result}
+
+@router.get("/diagnostic")
+async def mcp_router_diagnostic():
+    """Diagnostic endpoint to check MCP tools directly from the MCP router."""
+    try:
+        tools = await mcp_server.get_tools()
+        
+        # Handle both string tools and object tools
+        tool_names = []
+        for t in tools:
+            if isinstance(t, str):
+                tool_names.append(t)
+            else:
+                # Use getattr with fallback to handle objects that might not have a name attr
+                tool_names.append(getattr(t, "name", str(t)))
+                
+        return {
+            "tools": tool_names,
+            "status": "healthy"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
