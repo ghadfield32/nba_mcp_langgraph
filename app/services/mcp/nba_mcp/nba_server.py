@@ -95,6 +95,7 @@ from typing import Literal
 from pydantic import (
     BaseModel,
     Field,
+    validator,
 )
 
 
@@ -108,9 +109,16 @@ class LeagueLeadersParams(BaseModel):
         description="Stat code (e.g. 'AST')"
     )
     per_mode: Literal["Totals","PerGame","Per48"] = Field(
-        ...,
-        description="One of 'Totals', 'PerGame', or 'Per48'"
+        "PerGame",
+        description="One of 'Totals', 'PerGame', or 'Per48'. Defaults to 'PerGame' if omitted."
     )
+
+    @validator("per_mode", pre=True, always=True)
+    def ensure_per_mode(cls, v):
+        if v not in {"Totals", "PerGame", "Per48"}:
+            logger.debug("No per_mode supplied; defaulting to 'PerGame'")
+            return "PerGame"
+        return v
 
 
 

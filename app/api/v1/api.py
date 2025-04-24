@@ -26,6 +26,7 @@ api_router.include_router(mcp_router, prefix="/mcp", tags=["mcp"])
 # so we mount at /mcp-sse to allow access via /api/v1/mcp-sse/messages/{resource}
 api_router.mount("/mcp-sse", mcp_server.sse_app(), name="mcp_sse")
 
+
 # Add convenience redirect/instruction for the correct usage
 @api_router.get("/mcp-sse")
 async def mcp_sse_help():
