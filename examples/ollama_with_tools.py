@@ -18,7 +18,7 @@ async def main():
     
     # Create an initial state with a test question
     initial_state = {
-        "messages": [HumanMessage(content="Who were the top 5 scorers in 2024-25?")]
+        "messages": [HumanMessage(content="what games are on today?")]
     }
     
     # Stream the response

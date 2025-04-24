@@ -257,7 +257,8 @@ async def configure_graph():
                 ToolMessage(content=result, name=tool_name, tool_call_id=call["id"])
             )
 
-        return {"messages": outputs}
+        # Preserve entire conversation history so the next chat node has full context
+        return {"messages": state["messages"] + outputs}
 
 
     # 8) Termination logic
@@ -324,10 +325,10 @@ class LangGraphAgent:
         if self._connection_pool is None:
             try:
                 # Configure pool size based on environment
-                max_size = settings.postgres_pool_size
+                max_size = settings.POSTGRES_POOL_SIZE
 
                 self._connection_pool = AsyncConnectionPool(
-                    settings.postgres_url,
+                    settings.POSTGRES_URL,
                     open=False,
                     max_size=max_size,
                     kwargs={
@@ -543,7 +544,8 @@ class LangGraphAgent:
                             tool_call_id=tool_call["id"],
                         )
                     )
-                return {"messages": outputs}
+                # Return the *full* history plus tool outputs
+                return {"messages": state.messages + outputs}
 
             # … rest of your graph creation (unchanged) …
             graph_builder = StateGraph(GraphState)
@@ -692,7 +694,7 @@ class LangGraphAgent:
 
             # Use a new connection for this specific operation
             async with conn_pool.connection() as conn:
-                for table in settings.checkpoint_tables:
+                for table in settings.CHECKPOINT_TABLES:
                     try:
                         await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
                         logger.info(f"Cleared {table} for session {session_id}")
