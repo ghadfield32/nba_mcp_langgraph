@@ -5,8 +5,10 @@ location: app\core\langgraph\graph.py
 
 
 import ast
+import asyncio
 import inspect
 import json
+import sys
 from typing import (
     Any,
     AsyncGenerator,
@@ -51,7 +53,10 @@ from app.utils import (
     prepare_messages,
 )
 
-
+# Ensure psycopg compatibility on Windows for any late pool creation
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
 async def get_mcp_tools():
     """Get tools from the MCP NBA server.
     

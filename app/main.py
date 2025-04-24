@@ -4,8 +4,10 @@ location: app/main.py
 
 """
 
+import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pprint import pformat
@@ -43,6 +45,11 @@ from app.services.mcp.nba_mcp.nba_server import mcp_server
 
 # Load environment variables
 load_dotenv()
+
+# On Windows, psycopg requires the SelectorEventLoop, not the default ProactorEventLoop.
+# This must run before any async code (FastAPI startup, connection pools, etc.).
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Initialize Langfuse
 langfuse = Langfuse(
