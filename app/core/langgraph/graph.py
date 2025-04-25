@@ -61,6 +61,22 @@ from app.utils import (
     prepare_messages,
 )
 
+
+def resolve_mcp_tool(entry: Any) -> Optional[Any]:
+    """
+    If entry is a Tool instance, return it.
+    If entry is a string, try to look it up in mcp_server._tool_manager._tools.
+    Otherwise return None.
+    """
+    if hasattr(entry, "name"):
+        return entry
+    if isinstance(entry, str):
+        # fastmcp stores tools in _tool_manager._tools: name→Tool
+        tools_map = getattr(mcp_server, "_tool_manager", None)
+        if tools_map:
+            return tools_map._tools.get(entry)
+    return None
+
 # -----------------------------------------------------------------------------
 # Unified tool invoker: maps any tool interface (ainvoke/arun/run/run_async)
 # into a single `await _invoke(tool, args: dict)` call.
@@ -75,18 +91,32 @@ async def _invoke_tool_sync(tool: Any, args: dict) -> Any:
       1.   run(arguments=<dict>)
       2.   run(**args)          – including zero-arg `run()`
     """
+    logger.debug(f">>> _invoke_tool_sync: calling {getattr(tool, 'name', type(tool).__name__)!r} with args={args!r}")
+    
     run_fn: Callable = getattr(tool, "run")
+    logger.debug(f"Tool run function: {run_fn}")
+    
     try:                                            # ① run(arguments=...)
+        logger.debug("Attempting run(arguments=...)")
         result = run_fn(arguments=args)
-    except TypeError:
+        logger.debug(f"run(arguments=...) succeeded")
+    except TypeError as e:
+        logger.debug(f"run(arguments=...) failed: {e}")
         try:                                        # ② run(**args)  / run()
+            logger.debug(f"Attempting run(**args) with {args!r}")
             result = run_fn(**args)
-        except TypeError:
+            logger.debug(f"run(**args) succeeded")
+        except TypeError as e2:
+            logger.debug(f"run(**args) failed: {e2}, trying run() with no args")
             # Last-ditch effort: maybe the tool takes *no* args at all.
             result = run_fn()
+            logger.debug(f"run() with no args succeeded")
 
     if inspect.isawaitable(result):
+        logger.debug(f"Result is awaitable, awaiting it")
         result = await result                      # Handle async def run(...)
+    
+    logger.debug(f"<<< {getattr(tool, 'name', type(tool).__name__)!r} returned: {result!r}")
     return result
 
 
@@ -101,28 +131,53 @@ async def _invoke_tool_async(tool: Any, args: dict) -> Any:
       3.  ainvoke(**args) / ainvoke()  – rare, but handle it
       4.  fall back to _invoke_tool_sync
     """
+    tool_name = getattr(tool, "name", type(tool).__name__)
+    logger.debug(f">>> _invoke_tool_async: calling {tool_name!r} with args={json.dumps(args, default=str)}")
+    logger.debug(f"Tool type: {type(tool)}, dir: {dir(tool)}")
+    
     # ---- 1) Fast path: ainvoke ------------------------------------------------
     if hasattr(tool, "ainvoke"):
+        logger.debug(f"Tool has ainvoke method")
         async_fn: Callable[..., Awaitable] = getattr(tool, "ainvoke")
         sig = inspect.signature(async_fn)
+        logger.debug(f"ainvoke signature: {sig}")
         try:
             if "input" in sig.parameters:           # DuckDuckGo etc.
-                return await async_fn(input=args.get("query") or args or "")
+                logger.debug(f"Calling ainvoke(input=...)")
+                result = await async_fn(input=args.get("query") or args or "")
+                logger.debug(f"ainvoke(input=...) succeeded")
+                logger.debug(f"<<< {tool_name!r} returned: {result!r}")
+                return result
             elif "arguments" in sig.parameters:     # LangGraph style
-                return await async_fn(arguments=args)
+                logger.debug(f"Calling ainvoke(arguments=...)")
+                result = await async_fn(arguments=args)
+                logger.debug(f"ainvoke(arguments=...) succeeded")
+                logger.debug(f"<<< {tool_name!r} returned: {result!r}")
+                return result
             else:                                   # kwargs / no-arg style
-                return await async_fn(**args)
-        except TypeError:
+                logger.debug(f"Calling ainvoke(**args)")
+                result = await async_fn(**args)
+                logger.debug(f"ainvoke(**args) succeeded")
+                logger.debug(f"<<< {tool_name!r} returned: {result!r}")
+                return result
+        except TypeError as e:
+            logger.debug(f"ainvoke failed: {e}")
             # Fall through – maybe wrong style; we'll try sync version
             pass
 
     # ---- 2) Other async variants ---------------------------------------------
     for meth in ("arun", "run_async"):
         if hasattr(tool, meth):
+            logger.debug(f"Tool has {meth} method, trying it")
             result = getattr(tool, meth)(arguments=args)
-            return await result if inspect.isawaitable(result) else result
+            if inspect.isawaitable(result):
+                logger.debug(f"{meth} returned awaitable, awaiting it")
+                result = await result
+            logger.debug(f"<<< {tool_name!r} returned from {meth}: {result!r}")
+            return result
 
     # ---- 3) Fallback to sync --------------------------------------------------
+    logger.debug(f"No async methods found, falling back to _invoke_tool_sync")
     return await _invoke_tool_sync(tool, args)
 
 
@@ -144,12 +199,17 @@ if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
 async def get_mcp_tools():
-    """Get tools from the MCP NBA server.
-    
-    Returns:
-        List of MCP tools for the LangGraph agent.
-    """
-    return await mcp_server.get_tools()
+    """Get tools from the MCP NBA server, always resolving to Tool objects."""
+    raw = await mcp_server.get_tools()
+    entries = raw.values() if isinstance(raw, dict) else raw
+    resolved = []
+    for e in entries:
+        t = resolve_mcp_tool(e)
+        if t is not None:
+            resolved.append(t)
+        else:
+            logger.warning(f"Could not resolve MCP tool entry: {e!r}")
+    return resolved
 
 
 async def configure_graph():
@@ -158,12 +218,8 @@ async def configure_graph():
     # 1) Load the LLM
     llm = get_llm()
     
-    # 2) Fetch and normalize MCP tools
-    raw_mcp = await get_mcp_tools()
-    if isinstance(raw_mcp, dict):
-        mcp_tools = list(raw_mcp.values())
-    else:
-        mcp_tools = raw_mcp
+    # 2) Fetch and resolve MCP tools
+    mcp_tools = await get_mcp_tools()  # already resolved to Tool objects
     logger.info(f"Loaded {len(mcp_tools)} MCP tools for standalone graph")
     
     # 3) Convert MCP tools into OpenAI‐compatible function definitions
@@ -176,15 +232,37 @@ async def configure_graph():
         logger.info(f"Processing tool schema for: {tool_name}")
         logger.debug(f"Original schema: {schema}")
         
-        # Handle special cases explicitly by tool name
+        # Special case for league leaders - flatten parameters instead of nesting
         if tool_name == "get_league_leaders_info":
             logger.info("Applying special schema fix for get_league_leaders_info")
-            # Don't restructure - keep params at the root level since LLM will invoke it that way
-            mcp_fn_defs.append({
-                "name": tool_name,
-                "description": getattr(t, "description", "") or "",
-                "parameters": schema
-            })
+            # Extract the properties from within params and use them directly at top level
+            if "properties" in schema and "params" in schema["properties"]:
+                params_schema = schema["properties"]["params"]
+                if "properties" in params_schema:
+                    # Use the inner properties directly
+                    mcp_fn_defs.append({
+                        "name": tool_name,
+                        "description": getattr(t, "description", "") or "",
+                        "parameters": {
+                            "type": "object",
+                            "properties": params_schema["properties"],
+                            "required": params_schema.get("required", [])
+                        }
+                    })
+                else:
+                    # Fallback if structure not as expected
+                    mcp_fn_defs.append({
+                        "name": tool_name,
+                        "description": getattr(t, "description", "") or "",
+                        "parameters": schema
+                    })
+            else:
+                # Fallback to original schema
+                mcp_fn_defs.append({
+                    "name": tool_name,
+                    "description": getattr(t, "description", "") or "",
+                    "parameters": schema
+                })
         else:
             # Default handling for other tools
             mcp_fn_defs.append({
@@ -208,86 +286,132 @@ async def configure_graph():
     
     # 6) Define chat node
     async def chat(state):
+        """Generate a response from the LLM."""
+        logger.debug(f"chat node: Processing state with {len(state['messages'])} messages")
+        
         messages = prepare_messages(state["messages"], bound_llm, SYSTEM_PROMPT)
+        logger.debug(f"Prepared {len(messages)} messages for LLM")
+        
         try:
             # Apply Ollama-specific message fixes if using Ollama
             if (hasattr(bound_llm, "_llm_type") and "ollama" in bound_llm._llm_type.lower()) or \
                settings.llm_provider.lower() == "ollama":
                 logger.debug("Detected Ollama LLM in standalone chat node, applying message fixes")
-                fixed_messages = fix_messages_for_ollama(messages)
                 
-                # Dump messages to dict format for LLM
+                # Skip fix_messages_for_ollama and just dump the messages directly
                 message_dicts = []
-                for msg in fixed_messages:
+                for msg in messages:
                     if hasattr(msg, "model_dump"):
                         message_dicts.append(msg.model_dump())
-                    else:
-                        # Handle LangChain BaseMessage types
+                    elif hasattr(msg, "content"):  # For BaseMessage types
                         msg_dict = {"role": msg.type, "content": msg.content}
                         if hasattr(msg, "additional_kwargs"):
                             for k, v in msg.additional_kwargs.items():
                                 msg_dict[k] = v
                         message_dicts.append(msg_dict)
+                    else:  # Already a dict
+                        message_dicts.append(msg)
                 
-                logger.debug(f"Invoking Ollama LLM with {len(message_dicts)} fixed messages")
-                return {"messages": [await bound_llm.ainvoke(message_dicts)]}
+                logger.debug(f"Invoking Ollama LLM with {len(message_dicts)} messages")
+                
+                # Show sample of the first few messages
+                for i, msg in enumerate(message_dicts[:2]):
+                    logger.debug(f"Message {i}: role={msg.get('role')}, content={msg.get('content')[:50]}...")
+                
+                response = await bound_llm.ainvoke(message_dicts)
+                
+                # Debug the response and tool calls
+                logger.debug(f"Ollama response type: {type(response)}")
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    logger.debug(f"LLM response contains {len(response.tool_calls)} tool_calls:")
+                    for i, tc in enumerate(response.tool_calls):
+                        logger.debug(f"Tool call {i}: name={tc.get('name')}, args={json.dumps(tc.get('args'), default=str)}")
+                else:
+                    logger.debug("LLM response contains NO tool_calls")
+                
+                return {"messages": state["messages"] + [response]}
             else:
                 logger.debug(f"Using standard message format for LLM type: {getattr(bound_llm, '_llm_type', 'unknown')}")
-                return {"messages": [await bound_llm.ainvoke(dump_messages(messages))]}
+                
+                # Prepare OpenAI format messages
+                openai_messages = convert_to_openai_messages(messages)
+                logger.debug(f"Converted to {len(openai_messages)} OpenAI format messages")
+                
+                response = await bound_llm.ainvoke(openai_messages)
+                
+                # Debug the response and tool calls
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    logger.debug(f"LLM response contains {len(response.tool_calls)} tool_calls:")
+                    for i, tc in enumerate(response.tool_calls):
+                        logger.debug(f"Tool call {i}: name={tc.get('name')}, args={json.dumps(tc.get('args'), default=str)}")
+                else:
+                    logger.debug("LLM response contains NO tool_calls")
+                    
+                return {"messages": state["messages"] + [response]}
         except Exception as e:
-            logger.error(f"Error in chat node: {e}")
-            raise
+            logger.error(f"Error in chat node: {e}", exc_info=True)
+            return {
+                "messages": state["messages"] + [
+                    {"role": "assistant", "content": f"Error: Failed to get response from LLM. {str(e)}"}
+                ]
+            }
 
     # 7) Define tool call node
     async def tool_call(state):
         """Process tool calls from the last message."""
         outputs = []
-        last_message = state["messages"][-1]
-        
-        logger.debug(f"Checking for tool calls in message: {last_message}")
-        
-        if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
-            logger.warning("No tool_calls found in the last message")
+        last = state["messages"][-1]
+        if not getattr(last, "tool_calls", None):
             return {"messages": state["messages"]}
-            
-        logger.info(f"Processing {len(last_message.tool_calls)} tool calls")
-        
-        for call in last_message.tool_calls:
-            tool_name = call["name"]
-            args = call["args"]
-            tool = tools_by_name.get(tool_name)
 
-            logger.info(f"Calling tool '{tool_name}' with args: {args}")
+        for call in last.tool_calls:
+            name = call["name"]
+            args = call["args"]
+            tool = tools_by_name.get(name)
 
             if tool is None:
-                logger.error(f"Tool '{tool_name}' not found")
-                tool_result = f"Error: Tool '{tool_name}' not found"
+                logger.error(f"Tool '{name}' not found")
+                tool_result = f"Error: Tool '{name}' not found"
             else:
                 try:
-                    # Special handling for get_league_leaders_info
-                    if tool_name == "get_league_leaders_info":
+                    # special handling for league leaders - handle both direct args and params-wrapped args
+                    if name == "get_league_leaders_info":
                         from app.services.mcp.nba_mcp.nba_server import LeagueLeadersParams
-                        logger.debug(f"Special handling for get_league_leaders_info with args: {args}")
-                        try:
-                            # Create a LeagueLeadersParams instance
+                        if "params" in args and isinstance(args["params"], str):
+                            logger.warning(f"Received params as string: {args['params']}")
+                            # Try to parse the string as a dict
+                            try:
+                                import ast
+                                params_dict = ast.literal_eval(args["params"])
+                                # Map common field names if needed
+                                if "stat" in params_dict and "stat_category" not in params_dict:
+                                    params_dict["stat_category"] = params_dict.pop("stat")
+                                if "mode" in params_dict and "per_mode" not in params_dict:
+                                    params_dict["per_mode"] = params_dict.pop("mode")
+                                params = LeagueLeadersParams(**params_dict)
+                            except Exception as e:
+                                logger.error(f"Failed to parse params string: {e}")
+                                # Use original args as fallback
+                                params = LeagueLeadersParams(**args)
+                        elif "params" in args and isinstance(args["params"], dict):
+                            # Already properly structured
+                            params = LeagueLeadersParams(**args["params"])
+                        else:
+                            # Direct args format - create params from the args directly
                             params = LeagueLeadersParams(**args)
-                            logger.debug(f"Created LeagueLeadersParams: {params}")
-                            # Pass the params object to the tool
-                            tool_result = await _invoke_tool_async(tool, {"params": params})
-                        except Exception as e:
-                            logger.error(f"Error with LeagueLeadersParams: {e}")
-                            tool_result = f"Error with parameters for '{tool_name}': {str(e)}"
+                        
+                        tool_result = await _invoke_tool_async(tool, {"params": params})
                     else:
-                        logger.debug(f"Invoking {tool_name} with arguments: {args!r}")
                         tool_result = await _invoke_tool_async(tool, args)
-                        logger.debug(f"{tool_name} returned: {tool_result!r}")
                 except Exception as e:
-                    logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
-                    tool_result = f"Error executing tool '{tool_name}': {str(e)}"
+                    logger.error(f"Error executing '{name}': {e}", exc_info=True)
+                    tool_result = f"Error executing '{name}': {e}"
 
-            outputs.append(
-                ToolMessage(content=tool_result, name=tool_name, tool_call_id=call["id"])
-            )
+                outputs.append(ToolMessage(
+                    content=tool_result,
+                    name=name,
+                    tool_call_id=call["id"],
+                ))
 
         return {"messages": state["messages"] + outputs}
 
@@ -336,8 +460,7 @@ class LangGraphAgent:
         """Load MCP tools asynchronously."""
         try:
             # Fetch and normalize MCP tools
-            raw_mcp = await get_mcp_tools()
-            mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+            mcp_tools = await get_mcp_tools()  # already resolved to Tool objects
             self._mcp_tools = {t.name: t for t in mcp_tools}
             
             # Extract schemas for binding to LLM
@@ -612,23 +735,32 @@ class LangGraphAgent:
                     # Special handling for tools that need structured input
                     if tool_name == "get_league_leaders_info":
                         logger.debug(f"Special handling for get_league_leaders_info with args: {args}")
-                        # Check if args already has a params key
-                        if "params" in args:
-                            logger.debug("Args already has params key")
-                            tool_result = await _invoke_tool_async(tool, args)
-                        else:
-                            # We need to wrap the args in a params object
-                            logger.debug(f"Wrapping args in params object: {args}")
-                            from app.services.mcp.nba_mcp.nba_server import LeagueLeadersParams
+                        from app.services.mcp.nba_mcp.nba_server import LeagueLeadersParams
+
+                        # Handle params as a string (from Ollama)
+                        if "params" in args and isinstance(args["params"], str):
+                            logger.warning(f"Received params as string: {args['params']}")
                             try:
-                                # Create a LeagueLeadersParams instance
-                                params = LeagueLeadersParams(**args)
-                                logger.debug(f"Created params: {params}")
-                                # Pass the params object to the tool
+                                import ast
+                                params_dict = ast.literal_eval(args["params"])
+                                # Map common field names if needed
+                                if "stat" in params_dict and "stat_category" not in params_dict:
+                                    params_dict["stat_category"] = params_dict.pop("stat")
+                                if "mode" in params_dict and "per_mode" not in params_dict:
+                                    params_dict["per_mode"] = params_dict.pop("mode")
+                                params = LeagueLeadersParams(**params_dict)
                                 tool_result = await _invoke_tool_async(tool, {"params": params})
                             except Exception as e:
-                                logger.error(f"Error creating LeagueLeadersParams: {e}")
+                                logger.error(f"Failed to parse params string: {e}")
                                 tool_result = f"Error with parameters for '{tool_name}': {str(e)}"
+                        # Handle params as a dict
+                        elif "params" in args and isinstance(args["params"], dict):
+                            params = LeagueLeadersParams(**args["params"])
+                            tool_result = await _invoke_tool_async(tool, {"params": params})
+                        # Handle direct args (flattened schema)
+                        else:
+                            params = LeagueLeadersParams(**args)
+                            tool_result = await _invoke_tool_async(tool, {"params": params})
                     else:
                         logger.debug(f"Standard invocation for {tool_name} with args: {args}")
                         tool_result = await _invoke_tool_async(tool, args)
@@ -672,8 +804,7 @@ class LangGraphAgent:
 
         if self._graph is None:
             # 1) Fetch and normalize MCP tools
-            raw_mcp = await get_mcp_tools()
-            mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+            mcp_tools = await get_mcp_tools()  # already resolved to Tool objects
             self._mcp_tools = {t.name: t for t in mcp_tools}
             logger.info(f"Loaded {len(mcp_tools)} MCP tools")
 
@@ -836,8 +967,7 @@ class LangGraphAgent:
         if self._mcp_tools is None:
             logger.info("MCP tools not loaded yet, loading now...")
             # Fetch and normalize MCP tools
-            raw_mcp = await get_mcp_tools()
-            mcp_tools = list(raw_mcp.values()) if isinstance(raw_mcp, dict) else raw_mcp
+            mcp_tools = await get_mcp_tools()  # already resolved to Tool objects
             self._mcp_tools = {t.name: t for t in mcp_tools}
             
             # Update tools_by_name with MCP tools

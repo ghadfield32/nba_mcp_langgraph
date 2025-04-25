@@ -26,7 +26,9 @@ async def main():
     session_id = "demo-session-1"
     queries = [
         HumanMessage(content="Search: what's the weather in San Francisco?"),
-        HumanMessage(content="What were the top 5 players in the points per game in the NBA in 2024-25?")  # More specific NBA query
+        HumanMessage(content="What were the top 5 players in the points per game in the NBA in 2024-25?"),
+        HumanMessage(content="what are NBA games that are on today?"),
+        HumanMessage(content="What is the play by play of the heat game yesterday on 4/23/2025?"),
     ]
 
     # Ensure tools are loaded

@@ -49,15 +49,18 @@ def prepare_messages(messages: list[Message], llm: BaseChatModel, system_prompt:
     Returns:
         list[Message]: The prepared messages.
     """
-    trimmed_messages = _trim_messages(
-        dump_messages(messages),
-        strategy="last",
-        token_counter=llm,
-        max_tokens=settings.max_tokens,
-        start_on="human",
-        include_system=False,
-        allow_partial=False,
-    )
+    # DEBUGGING: Skip trimming to preserve all messages including tool calls
+    # trimmed_messages = _trim_messages(
+    #     dump_messages(messages),
+    #     strategy="last",
+    #     token_counter=llm,
+    #     max_tokens=settings.max_tokens,
+    #     start_on="human",
+    #     include_system=False,
+    #     allow_partial=False,
+    # )
+    logger.debug(f"TRIMMING DISABLED for debugging - passing all {len(messages)} messages")
+    trimmed_messages = dump_messages(messages)
     return [Message(role="system", content=system_prompt)] + trimmed_messages
 
 
@@ -125,18 +128,30 @@ def fix_messages_for_ollama(messages: List[BaseMessage]) -> List[BaseMessage]:
     return fixed_messages
 
 
+# DISABLED FOR DEBUGGING
+# def retry_on_ratelimit(max_retries=3, initial_delay=1):
+#     def decorator(fn):
+#         @wraps(fn)
+#         async def wrapper(*args, **kwargs):
+#             delay = initial_delay
+#             for _ in range(max_retries):
+#                 result = await fn(*args, **kwargs)
+#                 if isinstance(result, str) and "202" in result:
+#                     await asyncio.sleep(delay)
+#                     delay *= 2
+#                     continue
+#                 return result
+#             return result
+#         return wrapper
+#     return decorator
+
+# No-op replacement for debugging
 def retry_on_ratelimit(max_retries=3, initial_delay=1):
+    """Disabled retry decorator for debugging - passes through to original function"""
     def decorator(fn):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
-            delay = initial_delay
-            for _ in range(max_retries):
-                result = await fn(*args, **kwargs)
-                if isinstance(result, str) and "202" in result:
-                    await asyncio.sleep(delay)
-                    delay *= 2
-                    continue
-                return result
-            return result
+            logger.debug(f"DISABLED RETRY (graph.py): Direct call to {fn.__name__}")
+            return await fn(*args, **kwargs)
         return wrapper
     return decorator
